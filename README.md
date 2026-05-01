@@ -1,0 +1,274 @@
+# pod-deletion-cost-controller
+
+A Kubernetes controller that prevents HPA scale-down from terminating pods that are actively processing work.
+
+It does this by continuously annotating pods with [`controller.kubernetes.io/pod-deletion-cost`](https://kubernetes.io/docs/concepts/workloads/controllers/replicaset/#pod-deletion-cost) based on their real-time CPU usage. The ReplicaSet controller uses this annotation when choosing which pod to remove during scale-down: **lower cost = preferred for deletion**. Busy pods get a high cost so they are spared; idle pods get a low cost so they are picked first.
+
+## Problem
+
+If you run a workload that processes files of varying size — from small text documents to multi-hour video jobs — HPA scale-down will kill pods seemingly at random. A pod burning 2 CPU cores transcoding a video can be terminated just as easily as a pod sitting idle waiting for its next task. The annotation-based approach solves this without any changes to the workload code.
+
+## How it works
+
+```text
+every syncInterval (default 60s):
+  for each configured target (namespace + labelSelector):
+    for each matching pod in Running phase:
+      get CPU from metrics-server
+      if CPU > busyCPUThreshold  → annotate with busyCost   (high, protected)
+      if CPU ≤ busyCPUThreshold  → annotate with idleCost   (low, preferred for deletion)
+      if metrics not available   → annotate with noMetricsCost (high, pod is starting up)
+```
+
+Pods in non-Running phases (Pending, Succeeded, Failed) and pods already being terminated are left untouched.
+
+## Prerequisites
+
+- Kubernetes ≥ 1.22 (pod-deletion-cost annotation support)
+- [metrics-server](https://github.com/kubernetes-sigs/metrics-server) installed and working (`kubectl top pods` returns data)
+- Helm ≥ 3.x (for the recommended installation method)
+
+## Installation
+
+### Helm (recommended)
+
+Install from the OCI registry (no `helm repo add` needed):
+
+```bash
+helm install pdcc oci://ghcr.io/zepellin/charts/pod-deletion-cost-controller \
+  --version 0.1.0 \
+  --namespace pdcc-system \
+  --create-namespace \
+  --set config.targets[0].namespace=default \
+  --set 'config.targets[0].labelSelector=app=video-processor' \
+  --set config.busyCPUThreshold=200m
+```
+
+To deploy with a custom values file instead (recommended for multiple targets):
+
+```bash
+helm install pdcc oci://ghcr.io/zepellin/charts/pod-deletion-cost-controller \
+  --version 0.1.0 \
+  --namespace pdcc-system \
+  --create-namespace \
+  --values my-values.yaml
+```
+
+To upgrade an existing release:
+
+```bash
+helm upgrade pdcc oci://ghcr.io/zepellin/charts/pod-deletion-cost-controller \
+  --version 0.1.0 \
+  --namespace pdcc-system \
+  --values my-values.yaml
+```
+
+To uninstall:
+
+```bash
+helm uninstall pdcc --namespace pdcc-system
+```
+
+### Verify the installation
+
+```bash
+# Controller pod should be Running
+kubectl get pods -n pdcc-system
+
+# After one sync interval, check that target pods have the annotation
+kubectl get pods -n <your-namespace> \
+  -l <your-label-selector> \
+  -o custom-columns='NAME:.metadata.name,PHASE:.status.phase,COST:.metadata.annotations.controller\.kubernetes\.io/pod-deletion-cost'
+```
+
+## Configuration
+
+All configuration lives in a single YAML file, rendered from Helm values and mounted as a ConfigMap.
+
+### Full reference
+
+```yaml
+# How often to reconcile all target pods.
+# Accepts any Go duration string: "15s", "1m", "2m30s".
+syncInterval: "60s"
+
+# CPU threshold above which a pod is considered "busy" and protected from deletion.
+# Uses Kubernetes quantity notation: "100m" = 100 millicores, "0.5" = 500 millicores.
+# Tune this above your workload's idle baseline (including sidecar CPU noise).
+busyCPUThreshold: "500m"
+
+# pod-deletion-cost assigned to busy pods (CPU > threshold).
+# Higher value = less likely to be chosen for deletion.
+# Range: any int32. Default: 10000.
+busyCost: 10000
+
+# pod-deletion-cost assigned to idle pods (CPU ≤ threshold).
+# Lower value = preferred for deletion during scale-down.
+# Range: any int32. Default: 0. Use a negative value (e.g. -10000) for stronger preference.
+idleCost: 0
+
+# pod-deletion-cost assigned when metrics are not yet available.
+# This happens when a pod has just started and the metrics-server hasn't scraped it yet
+# (typically within the first 15–30 seconds of pod life).
+# Setting this equal to busyCost protects starting pods from being preempted.
+noMetricsCost: 10000
+
+# One or more workloads to manage. Each entry selects pods by namespace and label selector.
+targets:
+  - namespace: "default"
+    labelSelector: "app=video-processor"
+    # containers: which container names to include when summing CPU.
+    # Leave empty to sum ALL containers (including native sidecar containers).
+    # List specific names to exclude sidecar CPU from the busy calculation.
+    containers: []
+
+  - namespace: "processing"
+    labelSelector: "app=file-processor,tier=worker"
+    containers:
+      - main
+```
+
+### Helm values
+
+The controller is configured entirely through `config.*` in `values.yaml`. All other values control the Kubernetes resources themselves.
+
+| Value | Default | Description |
+|---|---|---|
+| `config.syncInterval` | `"60s"` | How often to reconcile all target pods |
+| `config.busyCPUThreshold` | `"500m"` | CPU above this = busy (Kubernetes quantity) |
+| `config.busyCost` | `10000` | Annotation value for busy pods |
+| `config.idleCost` | `0` | Annotation value for idle pods |
+| `config.noMetricsCost` | `10000` | Annotation value when metrics are unavailable |
+| `config.targets` | `[]` | List of target workloads (see above) |
+| `replicaCount` | `1` | Number of controller replicas (keep at 1; see [limitations](#limitations)) |
+| `image.repository` | `ghcr.io/zepellin/pod-deletion-cost-controller` | Container image repository |
+| `image.tag` | Chart `appVersion` | Image tag override |
+| `logLevel` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
+| `resources.requests.cpu` | `50m` | Controller CPU request |
+| `resources.requests.memory` | `64Mi` | Controller memory request |
+| `resources.limits.memory` | `128Mi` | Controller memory limit |
+
+### Tuning the CPU threshold
+
+The `busyCPUThreshold` is the most important setting. Set it:
+
+- **High enough** to be above the idle noise floor of your pods (a sleeping pod may burn 5–20m CPU just from the runtime, sidecars, etc.).
+- **Low enough** to catch a pod that has just started receiving work before it ramps up to full utilisation.
+
+A good starting point is to run `kubectl top pods` on your idle workload for a few minutes, take the maximum reading, and set the threshold to 2–3× that value.
+
+### Sidecar containers
+
+Pods running service meshes (Istio/Envoy), logging agents, or native Kubernetes sidecars (init containers with `restartPolicy: Always`, k8s ≥ 1.29) will have their sidecar CPU included in the total when `containers: []`.
+
+If sidecar CPU is significant enough to push the sum above `busyCPUThreshold` even when the main container is idle, use the `containers` list to restrict which containers are counted:
+
+```yaml
+targets:
+  - namespace: default
+    labelSelector: "app=video-processor"
+    containers:
+      - main         # only count the main application container
+```
+
+## Usage examples
+
+### Single namespace, single workload
+
+```yaml
+config:
+  busyCPUThreshold: "200m"
+  targets:
+    - namespace: default
+      labelSelector: "app=video-processor"
+      containers: []
+```
+
+### Multiple namespaces
+
+```yaml
+config:
+  syncInterval: "20s"
+  busyCPUThreshold: "150m"
+  targets:
+    - namespace: team-a
+      labelSelector: "app=encoder"
+      containers:
+        - encoder
+    - namespace: team-b
+      labelSelector: "app=transcoder"
+      containers:
+        - transcoder
+```
+
+### More aggressive idle preference
+
+Setting `idleCost` to a large negative value pushes idle pods strongly to the front of the deletion queue, useful if you have many replicas and want fast scale-down of idle ones:
+
+```yaml
+config:
+  busyCost: 10000
+  idleCost: -10000
+```
+
+### Debug logging
+
+To see per-pod decisions on every sync:
+
+```bash
+helm upgrade pdcc ./helm/pod-deletion-cost-controller \
+  --namespace pdcc-system \
+  --set logLevel=debug
+```
+
+Log output is structured JSON (one line per event):
+
+```json
+{"time":"...","level":"DEBUG","msg":"pod busy","pod":"worker-abc","namespace":"default","cpu":"450m","threshold":"100m","cost":10000}
+{"time":"...","level":"DEBUG","msg":"pod idle","pod":"worker-xyz","namespace":"default","cpu":"8m","threshold":"100m","cost":0}
+{"time":"...","level":"DEBUG","msg":"metrics not yet available, protecting pod","pod":"worker-new","namespace":"default","cost":10000}
+```
+
+## RBAC
+
+The Helm chart creates a `ClusterRole` with the following permissions, bound to the controller's `ServiceAccount`:
+
+```yaml
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+```
+
+The `ClusterRole` is required because `targets` can reference pods in any namespace. No write access to any other resource type is needed.
+
+## Building from source
+
+```bash
+git clone https://github.com/zepellin/pod-deletion-cost-controller
+cd pod-deletion-cost-controller
+
+# Build the binary
+make build               # produces bin/controller
+
+# Run all tests (downloads envtest binaries on first run)
+make test
+
+# Unit tests only (no cluster binaries required)
+make test-unit
+
+# Build the container image
+docker build -t pod-deletion-cost-controller:dev .
+```
+
+**Requirements:** Go 1.26, Docker (for image build), GNU Make.
+
+## Limitations
+
+- **Single replica only.** Leader election is not implemented. Running more than one replica causes harmless annotation races (both replicas write the same value) but is wasteful. Keep `replicaCount: 1`.
+- **CPU is the only signal.** The controller has no way to know that a pod is "busy" by other means (open file handles, queue depth, network I/O). If your workload's CPU profile during processing is similar to idle, the threshold approach will not work reliably — consider exposing a custom metric instead.
+- **metrics-server required.** If your cluster uses the Prometheus Adapter to serve `metrics.k8s.io`, verify that `kubectl top pods` works in your target namespaces. If the metrics API is unavailable, the controller logs a warning and protects all pods (sets `noMetricsCost`) until metrics recover.
+- **Annotation is not removed when a pod exits scope.** If you remove a pod's labels or change the `labelSelector`, the pod keeps its last annotation value. This is harmless — the ReplicaSet will simply not include it in deletion-cost ordering once it's no longer part of the managed set.

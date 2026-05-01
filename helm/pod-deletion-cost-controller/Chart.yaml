@@ -1,0 +1,6 @@
+apiVersion: v2
+name: pod-deletion-cost-controller
+description: Annotates pods with controller.kubernetes.io/pod-deletion-cost based on CPU usage to guide HPA scale-down away from actively processing pods.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -1,0 +1,81 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/mdanko/pod-deletion-cost-controller
+  pullPolicy: IfNotPresent
+  # Overrides the image tag; defaults to Chart.appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  # If not set, a name is generated using the fullname template.
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  fsGroup: 65532
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# log level: debug | info | warn | error
+logLevel: info
+
+# Controller configuration — rendered into a ConfigMap and mounted into the pod.
+config:
+  # How often to reconcile all target pods.
+  syncInterval: "60s"
+
+  # CPU threshold above which a pod is considered "busy".
+  # Uses Kubernetes quantity notation: "100m" = 100 millicores, "0.5" = 500 millicores.
+  # Tune this to be above the idle/sidecar noise floor for your workload.
+  busyCPUThreshold: "500m"
+
+  # pod-deletion-cost assigned to busy pods (higher = less likely to be deleted).
+  busyCost: 10000
+
+  # pod-deletion-cost assigned to idle pods (lower = preferred for deletion).
+  idleCost: 0
+
+  # pod-deletion-cost assigned when metrics are not yet available (e.g. pod just started).
+  # Set equal to busyCost to protect starting pods from preemption.
+  noMetricsCost: 10000
+
+  # Workloads to manage. Each entry targets all pods matching the label selector
+  # within the given namespace.
+  targets: []
+  # Example:
+  # targets:
+  #   - namespace: default
+  #     labelSelector: "app=video-processor"
+  #     # containers: list specific container names to include in the CPU sum.
+  #     # Leave empty to sum ALL containers (including native sidecars).
+  #     # Use this to exclude sidecar CPU from the busy decision.
+  #     containers: []
+  #
+  #   - namespace: processing
+  #     labelSelector: "app=file-processor,tier=worker"
+  #     containers:
+  #       - main

@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "pod-deletion-cost-controller.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "pod-deletion-cost-controller.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    syncInterval: {{ .Values.config.syncInterval | quote }}
+    busyCPUThreshold: {{ .Values.config.busyCPUThreshold | quote }}
+    busyCost: {{ .Values.config.busyCost }}
+    idleCost: {{ .Values.config.idleCost }}
+    noMetricsCost: {{ .Values.config.noMetricsCost }}
+    targets:
+    {{- if .Values.config.targets }}
+    {{- range .Values.config.targets }}
+      - namespace: {{ .namespace | quote }}
+        labelSelector: {{ .labelSelector | quote }}
+        {{- if .containers }}
+        containers:
+        {{- range .containers }}
+          - {{ . | quote }}
+        {{- end }}
+        {{- else }}
+        containers: []
+        {{- end }}
+    {{- end }}
+    {{- else }}
+      []
+    {{- end }}
