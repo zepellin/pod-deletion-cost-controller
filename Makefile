@@ -1,5 +1,5 @@
 BIN_DIR            := bin
-ENVTEST_K8S_VERSION := 1.32.0
+ENVTEST_K8S_VERSION := 1.33.x
 ENVTEST_BIN        := $(BIN_DIR)/setup-envtest
 ENVTEST_ASSETS     := $(BIN_DIR)/envtest-assets
 
