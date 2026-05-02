@@ -11,15 +11,15 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
       - name: Cache envtest binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: bin/envtest-assets
           key: envtest-1.32.0-${{ runner.os }}-${{ runner.arch }}
