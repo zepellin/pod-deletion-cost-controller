@@ -62,9 +62,9 @@ jobs:
       - name: Install kind
         run: |
           ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-          curl -fsSL -o /usr/local/bin/kind \
+          curl -fsSL -o /tmp/kind \
             "https://github.com/kubernetes-sigs/kind/releases/latest/download/kind-linux-${ARCH}"
-          chmod +x /usr/local/bin/kind
+          sudo install -m 755 /tmp/kind /usr/local/bin/kind
 
       - name: Create kind cluster
         run: kind create cluster --wait 120s
