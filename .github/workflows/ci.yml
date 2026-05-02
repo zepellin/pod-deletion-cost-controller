@@ -44,13 +44,13 @@ jobs:
         run: |
           helm lint helm/pod-deletion-cost-controller \
             --set 'config.targets[0].namespace=default' \
-            --set 'config.targets[0].labelSelector=app=test-worker'
+            --set 'config.targets[0].labelSelector=tier=worker'
 
       - name: Render templates
         run: |
           helm template pdcc helm/pod-deletion-cost-controller \
             --set 'config.targets[0].namespace=default' \
-            --set 'config.targets[0].labelSelector=app=test-worker'
+            --set 'config.targets[0].labelSelector=tier=worker'
 
   helm-install:
     name: Helm install test
@@ -69,6 +69,14 @@ jobs:
       - name: Create kind cluster
         run: kind create cluster --wait 120s
 
+      - name: Install metrics-server
+        run: |
+          helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/
+          helm install metrics-server metrics-server/metrics-server \
+            --namespace kube-system \
+            --set 'args={--kubelet-insecure-tls}' \
+            --wait --timeout 120s
+
       - name: Build controller image
         run: docker build -t pod-deletion-cost-controller:ci .
 
@@ -83,71 +91,88 @@ jobs:
             --set image.repository=pod-deletion-cost-controller \
             --set image.tag=ci \
             --set image.pullPolicy=Never \
-            --set config.syncInterval=5s \
+            --set config.syncInterval=10s \
+            --set config.busyCPUThreshold=100m \
             --set 'config.targets[0].namespace=default' \
-            --set 'config.targets[0].labelSelector=app=test-worker'
+            --set 'config.targets[0].labelSelector=tier=worker'
 
       - name: Wait for controller to be ready
         run: |
           kubectl rollout status deployment/pdcc-pod-deletion-cost-controller \
             -n pdcc-system --timeout=120s
 
-      - name: Deploy test workload
+      - name: Deploy idle and busy test workloads
         run: |
           kubectl apply -f - <<'EOF'
           apiVersion: apps/v1
           kind: Deployment
           metadata:
-            name: test-worker
+            name: idle-worker
             namespace: default
           spec:
-            replicas: 2
+            replicas: 1
             selector:
               matchLabels:
-                app: test-worker
+                tier: worker
+                type: idle
             template:
               metadata:
                 labels:
-                  app: test-worker
+                  tier: worker
+                  type: idle
               spec:
                 containers:
                   - name: main
                     image: busybox:stable
-                    command: ["sh", "-c", "while true; do sleep 1; done"]
+                    command: ["sh", "-c", "sleep infinity"]
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: busy-worker
+            namespace: default
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                tier: worker
+                type: busy
+            template:
+              metadata:
+                labels:
+                  tier: worker
+                  type: busy
+              spec:
+                containers:
+                  - name: main
+                    image: busybox:stable
+                    command: ["sh", "-c", "while true; do :; done"]
           EOF
-          kubectl wait --for=condition=Available deployment/test-worker \
+          kubectl wait --for=condition=Available \
+            deployment/idle-worker deployment/busy-worker \
             -n default --timeout=120s
 
-      - name: Wait for annotations to appear
+      - name: Wait for correct annotations
         run: |
-          echo "Waiting for pod-deletion-cost annotations (up to 60s)..."
-          for i in $(seq 1 30); do
-            total=$(kubectl get pods -l app=test-worker -n default --no-headers 2>/dev/null | wc -l)
-            annotated=$(kubectl get pods -l app=test-worker -n default \
-              -o jsonpath='{.items[*].metadata.annotations.controller\.kubernetes\.io/pod-deletion-cost}' \
-              2>/dev/null | wc -w)
-            if [ "$total" -gt 0 ] && [ "$annotated" -eq "$total" ]; then
-              echo "All $total pods annotated"
-              break
+          echo "Waiting for idle→cost=0 and busy→cost=10000 (up to 3 min)..."
+          for i in $(seq 1 36); do
+            idle_cost=$(kubectl get pods -l 'tier=worker,type=idle' -n default \
+              -o jsonpath='{.items[0].metadata.annotations.controller\.kubernetes\.io/pod-deletion-cost}' \
+              2>/dev/null)
+            busy_cost=$(kubectl get pods -l 'tier=worker,type=busy' -n default \
+              -o jsonpath='{.items[0].metadata.annotations.controller\.kubernetes\.io/pod-deletion-cost}' \
+              2>/dev/null)
+            echo "[$i/36] idle=${idle_cost:-unset} busy=${busy_cost:-unset}"
+            if [ "$idle_cost" = "0" ] && [ "$busy_cost" = "10000" ]; then
+              echo "Annotations correct"
+              exit 0
             fi
-            if [ "$i" -eq 30 ]; then
-              echo "ERROR: only $annotated/$total pods annotated after 60s"
+            if [ "$i" -eq 36 ]; then
+              echo "ERROR: timed out after 3 minutes"
+              kubectl get pods -n default -o wide
+              kubectl top pods -n default 2>/dev/null || true
               kubectl logs -l app.kubernetes.io/instance=pdcc -n pdcc-system --tail=50
               exit 1
             fi
-            sleep 2
+            sleep 5
           done
-
-      - name: Verify annotation values
-        run: |
-          kubectl get pods -l app=test-worker -n default \
-            -o custom-columns='NAME:.metadata.name,COST:.metadata.annotations.controller\.kubernetes\.io/pod-deletion-cost'
-          values=$(kubectl get pods -l app=test-worker -n default \
-            -o jsonpath='{.items[*].metadata.annotations.controller\.kubernetes\.io/pod-deletion-cost}')
-          for val in $values; do
-            if [ "$val" != "10000" ]; then
-              echo "ERROR: unexpected annotation value '$val' (want 10000)"
-              exit 1
-            fi
-          done
-          echo "All annotations correct (noMetricsCost=10000, as expected without metrics-server)"
