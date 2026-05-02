@@ -11,6 +11,7 @@ import (
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/mdanko/pod-deletion-cost-controller/internal/config"
@@ -18,6 +19,22 @@ import (
 )
 
 const annotationDeletionCost = "controller.kubernetes.io/pod-deletion-cost"
+
+// patchBackoff is used when the API server signals it is overloaded (429 / 503 / timeout).
+// Five attempts: ~200 ms → 400 ms → 800 ms → 1.6 s → 3.2 s, capped at 8 s.
+var patchBackoff = wait.Backoff{
+	Duration: 200 * time.Millisecond,
+	Factor:   2.0,
+	Jitter:   0.1,
+	Steps:    5,
+	Cap:      8 * time.Second,
+}
+
+func isRetryablePatchErr(err error) bool {
+	return kerrors.IsTooManyRequests(err) ||
+		kerrors.IsServerTimeout(err) ||
+		kerrors.IsServiceUnavailable(err)
+}
 
 // Syncer periodically reconciles pod-deletion-cost annotations for all configured targets.
 type Syncer struct {
@@ -136,13 +153,24 @@ func (s *Syncer) setAnnotation(ctx context.Context, pod *corev1.Pod, cost int32,
 	}
 
 	patch := fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, annotationDeletionCost, desired)
-	_, err := s.k8s.CoreV1().Pods(pod.Namespace).Patch(
-		ctx,
-		pod.Name,
-		types.MergePatchType,
-		[]byte(patch),
-		metav1.PatchOptions{},
-	)
+
+	var lastErr error
+	err := wait.ExponentialBackoffWithContext(ctx, patchBackoff, func(ctx context.Context) (bool, error) {
+		_, lastErr = s.k8s.CoreV1().Pods(pod.Namespace).Patch(
+			ctx, pod.Name, types.MergePatchType, []byte(patch), metav1.PatchOptions{},
+		)
+		if lastErr == nil {
+			return true, nil
+		}
+		if isRetryablePatchErr(lastErr) {
+			log.Warn("patch throttled, retrying", "err", lastErr)
+			return false, nil
+		}
+		return false, lastErr
+	})
+	if wait.Interrupted(err) {
+		return fmt.Errorf("patch annotation: retries exhausted: %w", lastErr)
+	}
 	if err != nil {
 		return fmt.Errorf("patch annotation: %w", err)
 	}
