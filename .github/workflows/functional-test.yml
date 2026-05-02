@@ -1,39 +1,12 @@
-name: CI
+name: Functional Test
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
   pull_request:
-    branches: [main]
+    branches: [ main ]
 
 jobs:
-  test:
-    name: Test (k8s ${{ matrix.k8s-version }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        k8s-version: ["1.33.x", "1.34.x", "1.35.x", "1.36.x"]
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-
-      - name: Cache envtest binaries
-        uses: actions/cache@v5
-        with:
-          path: bin/envtest-assets
-          key: envtest-${{ matrix.k8s-version }}-${{ runner.os }}-${{ runner.arch }}
-
-      - name: Run tests
-        run: make test ENVTEST_K8S_VERSION=${{ matrix.k8s-version }}
-
-      - name: Build
-        run: make build
-
   helm-lint:
     name: Helm lint
     runs-on: ubuntu-latest
