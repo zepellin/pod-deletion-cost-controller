@@ -69,10 +69,24 @@ func main() {
 }
 
 func buildRestConfig(kubeconfigPath string) (*rest.Config, error) {
+	var (
+		cfg *rest.Config
+		err error
+	)
 	if kubeconfigPath == "" {
-		return rest.InClusterConfig()
+		cfg, err = rest.InClusterConfig()
+	} else {
+		cfg, err = clientcmd.BuildConfigFromFlags("", kubeconfigPath)
 	}
-	return clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	if err != nil {
+		return nil, err
+	}
+	// client-go rate-limits all API calls via a token bucket; be explicit so
+	// operators can see and tune these values. Default (5 QPS / 10 burst) is
+	// designed for scripts, not controllers.
+	cfg.QPS = 20
+	cfg.Burst = 30
+	return cfg, nil
 }
 
 func startHealthServer(addr string, log *slog.Logger) {
