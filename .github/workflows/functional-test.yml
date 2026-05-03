@@ -13,17 +13,33 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Lint chart
+      - name: Lint chart (threshold strategy)
         run: |
           helm lint helm/pod-deletion-cost-controller \
             --set 'config.targets[0].namespace=default' \
             --set 'config.targets[0].labelSelector=tier=worker'
 
-      - name: Render templates
+      - name: Render templates (threshold strategy)
         run: |
           helm template pdcc helm/pod-deletion-cost-controller \
             --set 'config.targets[0].namespace=default' \
             --set 'config.targets[0].labelSelector=tier=worker'
+
+      - name: Lint chart (escalating strategy)
+        run: |
+          helm lint helm/pod-deletion-cost-controller \
+            --set 'config.targets[0].namespace=default' \
+            --set 'config.targets[0].labelSelector=tier=worker' \
+            --set 'config.targets[0].strategy=escalating' \
+            --set 'config.targets[0].escalatingStep=1000'
+
+      - name: Render templates (escalating strategy)
+        run: |
+          helm template pdcc helm/pod-deletion-cost-controller \
+            --set 'config.targets[0].namespace=default' \
+            --set 'config.targets[0].labelSelector=tier=worker' \
+            --set 'config.targets[0].strategy=escalating' \
+            --set 'config.targets[0].escalatingStep=1000'
 
   helm-install:
     name: Helm install test
@@ -125,7 +141,7 @@ jobs:
             deployment/idle-worker deployment/busy-worker \
             -n default --timeout=120s
 
-      - name: Wait for correct annotations
+      - name: Wait for correct threshold-strategy annotations
         run: |
           echo "Waiting for idle→cost=0 and busy→cost=10000 (up to 3 min)..."
           for i in $(seq 1 36); do
@@ -149,3 +165,87 @@ jobs:
             fi
             sleep 5
           done
+
+      - name: Deploy escalating-strategy test workload
+        run: |
+          kubectl create namespace esc-test
+          kubectl apply -f - <<'EOF'
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: esc-worker
+            namespace: esc-test
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                tier: esc-worker
+            template:
+              metadata:
+                labels:
+                  tier: esc-worker
+              spec:
+                containers:
+                  - name: main
+                    image: busybox:stable
+                    command: ["sh", "-c", "while true; do :; done"]
+          EOF
+          kubectl wait --for=condition=Available \
+            deployment/esc-worker -n esc-test --timeout=120s
+
+      - name: Add escalating target and upgrade controller
+        run: |
+          helm upgrade pdcc ./helm/pod-deletion-cost-controller \
+            --namespace pdcc-system \
+            --set image.repository=pod-deletion-cost-controller \
+            --set image.tag=ci \
+            --set image.pullPolicy=Never \
+            --set config.syncInterval=10s \
+            --set config.busyCPUThreshold=100m \
+            --set config.noMetricsCost=0 \
+            --set 'config.targets[0].namespace=default' \
+            --set 'config.targets[0].labelSelector=tier=worker' \
+            --set 'config.targets[1].namespace=esc-test' \
+            --set 'config.targets[1].labelSelector=tier=esc-worker' \
+            --set 'config.targets[1].strategy=escalating' \
+            --set 'config.targets[1].escalatingStep=1000'
+          kubectl rollout status deployment/pdcc-pod-deletion-cost-controller \
+            -n pdcc-system --timeout=120s
+
+      - name: Verify escalating strategy increases cost over time
+        run: |
+          echo "Waiting for initial annotation on escalating pod (up to 3 min)..."
+          cost1=""
+          for i in $(seq 1 36); do
+            cost1=$(kubectl get pods -l 'tier=esc-worker' -n esc-test \
+              -o jsonpath='{.items[0].metadata.annotations.controller\.kubernetes\.io/pod-deletion-cost}' \
+              2>/dev/null)
+            echo "[$i/36] cost=${cost1:-unset}"
+            if [ -n "$cost1" ] && [ "$cost1" -gt 0 ] 2>/dev/null; then
+              echo "Initial cost: $cost1"
+              break
+            fi
+            if [ "$i" -eq 36 ]; then
+              echo "ERROR: no annotation after 3 minutes"
+              kubectl logs -l app.kubernetes.io/instance=pdcc -n pdcc-system --tail=50
+              exit 1
+            fi
+            sleep 5
+          done
+
+          echo "Waiting one more sync cycle for cost to escalate..."
+          sleep 15
+
+          cost2=$(kubectl get pods -l 'tier=esc-worker' -n esc-test \
+            -o jsonpath='{.items[0].metadata.annotations.controller\.kubernetes\.io/pod-deletion-cost}' \
+            2>/dev/null)
+          echo "Cost after additional sync: ${cost2:-unset}"
+
+          if [ -z "$cost2" ] || ! [ "$cost2" -gt "$cost1" ] 2>/dev/null; then
+            echo "ERROR: cost did not escalate ($cost1 → ${cost2:-unset})"
+            kubectl get pods -n esc-test -o wide
+            kubectl top pods -n esc-test 2>/dev/null || true
+            kubectl logs -l app.kubernetes.io/instance=pdcc -n pdcc-system --tail=50
+            exit 1
+          fi
+          echo "Escalation confirmed: $cost1 → $cost2"

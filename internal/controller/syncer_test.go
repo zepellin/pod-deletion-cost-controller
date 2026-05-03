@@ -410,3 +410,63 @@ func TestSyncer_TransitionBusyToIdle(t *testing.T) {
 		t.Errorf("after going idle: want 0, got %q", got)
 	}
 }
+
+func TestSyncer_EscalatingStrategy(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	ns := newNamespace(t, ctx)
+
+	pod := newRunningPod(t, ctx, ns, "escalating-pod", map[string]string{"app": "test"})
+
+	// Use a mutable variable so the same getter closure can simulate CPU changing between syncs.
+	cpuStr := "500m"
+	getter := metrics.GetterFunc(func(_ context.Context, _, name string, _ []string) (resource.Quantity, error) {
+		if name == pod.Name {
+			return resource.MustParse(cpuStr), nil
+		}
+		return resource.Quantity{}, nil
+	})
+
+	cfg := &config.Config{
+		BusyCPUThreshold: resource.MustParse("100m"),
+		BusyCost:         10000,
+		IdleCost:         0,
+		NoMetricsCost:    10000,
+		Targets: []config.Target{{
+			Namespace:      ns,
+			LabelSelector:  "app=test",
+			Strategy:       "escalating",
+			EscalatingStep: 3000,
+			EscalatingMax:  9000,
+		}},
+	}
+	syncer := newSyncer(cfg, getter)
+
+	syncer.SyncOnce(ctx)
+	if got := getDeletionCost(t, ctx, ns, pod.Name); got != "3000" {
+		t.Errorf("tick 1: want 3000, got %q", got)
+	}
+
+	syncer.SyncOnce(ctx)
+	if got := getDeletionCost(t, ctx, ns, pod.Name); got != "6000" {
+		t.Errorf("tick 2: want 6000, got %q", got)
+	}
+
+	syncer.SyncOnce(ctx)
+	if got := getDeletionCost(t, ctx, ns, pod.Name); got != "9000" {
+		t.Errorf("tick 3: want 9000, got %q", got)
+	}
+
+	// At the cap — annotation must not change (idempotent).
+	syncer.SyncOnce(ctx)
+	if got := getDeletionCost(t, ctx, ns, pod.Name); got != "9000" {
+		t.Errorf("tick 4 (capped): want 9000, got %q", got)
+	}
+
+	// Pod goes idle — cost resets to 0.
+	cpuStr = "5m"
+	syncer.SyncOnce(ctx)
+	if got := getDeletionCost(t, ctx, ns, pod.Name); got != "0" {
+		t.Errorf("after idle: want 0, got %q", got)
+	}
+}

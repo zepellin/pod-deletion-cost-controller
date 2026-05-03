@@ -13,7 +13,7 @@ build:
 
 # Unit tests only — no envtest binaries required.
 test-unit:
-	go test ./internal/config/... ./internal/metrics/...
+	go test ./internal/config/... ./internal/metrics/... ./internal/strategy/...
 
 # Full test suite including envtest integration tests.
 test: test-unit $(ENVTEST_BIN)

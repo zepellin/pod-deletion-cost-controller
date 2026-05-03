@@ -74,8 +74,19 @@ config:
   #     # Leave empty to sum ALL containers (including native sidecars).
   #     # Use this to exclude sidecar CPU from the busy decision.
   #     containers: []
+  #     # strategy selects the costing algorithm (default: "threshold").
+  #     # "threshold"  — fixed busyCost when above threshold, idleCost otherwise.
+  #     # "escalating" — cost increments by escalatingStep each busy sync cycle,
+  #     #                up to escalatingMax; resets to idleCost when idle.
+  #     #                Gives long-running busy pods stronger protection over time.
+  #     strategy: threshold
   #
   #   - namespace: processing
   #     labelSelector: "app=file-processor,tier=worker"
   #     containers:
   #       - main
+  #     strategy: escalating
+  #     # escalatingStep: cost added per busy sync cycle (default: busyCost/10).
+  #     escalatingStep: 1000
+  #     # escalatingMax: cost ceiling for the escalating strategy (default: 1000000).
+  #     escalatingMax: 1000000
