@@ -8,7 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/mdanko/pod-deletion-cost-controller/internal/strategy"
+	"github.com/zepellin/pod-deletion-cost-controller/internal/strategy"
 )
 
 func ptr(q resource.Quantity) *resource.Quantity { return &q }

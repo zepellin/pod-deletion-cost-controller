@@ -8,7 +8,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	"github.com/mdanko/pod-deletion-cost-controller/internal/config"
+	"github.com/zepellin/pod-deletion-cost-controller/internal/config"
 )
 
 func writeConfig(t *testing.T, content string) string {

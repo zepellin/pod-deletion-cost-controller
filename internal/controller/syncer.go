@@ -14,9 +14,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/mdanko/pod-deletion-cost-controller/internal/config"
-	"github.com/mdanko/pod-deletion-cost-controller/internal/metrics"
-	"github.com/mdanko/pod-deletion-cost-controller/internal/strategy"
+	"github.com/zepellin/pod-deletion-cost-controller/internal/config"
+	"github.com/zepellin/pod-deletion-cost-controller/internal/metrics"
+	"github.com/zepellin/pod-deletion-cost-controller/internal/strategy"
 )
 
 const annotationDeletionCost = "controller.kubernetes.io/pod-deletion-cost"

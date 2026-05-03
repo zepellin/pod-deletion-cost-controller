@@ -16,9 +16,9 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	"github.com/mdanko/pod-deletion-cost-controller/internal/config"
-	"github.com/mdanko/pod-deletion-cost-controller/internal/controller"
-	"github.com/mdanko/pod-deletion-cost-controller/internal/metrics"
+	"github.com/zepellin/pod-deletion-cost-controller/internal/config"
+	"github.com/zepellin/pod-deletion-cost-controller/internal/controller"
+	"github.com/zepellin/pod-deletion-cost-controller/internal/metrics"
 )
 
 // Package-level envtest state, started once for all tests in this package.

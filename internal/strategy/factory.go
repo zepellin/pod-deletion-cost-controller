@@ -1,6 +1,6 @@
 package strategy
 
-import "github.com/mdanko/pod-deletion-cost-controller/internal/config"
+import "github.com/zepellin/pod-deletion-cost-controller/internal/config"
 
 // defaultEscalatingMax is the cost ceiling used when escalatingMax is not configured.
 // Large enough to be effectively uncapped for typical workloads.
