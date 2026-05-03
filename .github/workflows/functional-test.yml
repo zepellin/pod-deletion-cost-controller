@@ -202,6 +202,7 @@ jobs:
             --set image.pullPolicy=Never \
             --set config.syncInterval=10s \
             --set config.busyCPUThreshold=100m \
+            --set config.noMetricsCost=0 \
             --set 'config.targets[0].namespace=default' \
             --set 'config.targets[0].labelSelector=tier=worker' \
             --set 'config.targets[1].namespace=esc-test' \
