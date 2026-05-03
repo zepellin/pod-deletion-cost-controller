@@ -16,6 +16,7 @@ import (
 
 	"github.com/mdanko/pod-deletion-cost-controller/internal/config"
 	"github.com/mdanko/pod-deletion-cost-controller/internal/metrics"
+	"github.com/mdanko/pod-deletion-cost-controller/internal/strategy"
 )
 
 const annotationDeletionCost = "controller.kubernetes.io/pod-deletion-cost"
@@ -38,14 +39,19 @@ func isRetryablePatchErr(err error) bool {
 
 // Syncer periodically reconciles pod-deletion-cost annotations for all configured targets.
 type Syncer struct {
-	k8s     kubernetes.Interface
-	metrics metrics.Getter
-	cfg     *config.Config
-	log     *slog.Logger
+	k8s        kubernetes.Interface
+	metrics    metrics.Getter
+	cfg        *config.Config
+	log        *slog.Logger
+	strategies []strategy.Strategy
 }
 
 func New(k8s kubernetes.Interface, mc metrics.Getter, cfg *config.Config, log *slog.Logger) *Syncer {
-	return &Syncer{k8s: k8s, metrics: mc, cfg: cfg, log: log}
+	strategies := make([]strategy.Strategy, len(cfg.Targets))
+	for i, t := range cfg.Targets {
+		strategies[i] = strategy.New(t, cfg)
+	}
+	return &Syncer{k8s: k8s, metrics: mc, cfg: cfg, log: log, strategies: strategies}
 }
 
 // SyncOnce runs a single reconciliation pass across all targets.
@@ -74,8 +80,8 @@ func (s *Syncer) Run(ctx context.Context) error {
 }
 
 func (s *Syncer) syncAll(ctx context.Context) {
-	for _, target := range s.cfg.Targets {
-		if err := s.syncTarget(ctx, target); err != nil {
+	for i, target := range s.cfg.Targets {
+		if err := s.syncTarget(ctx, target, s.strategies[i]); err != nil {
 			s.log.Error("target sync failed",
 				"namespace", target.Namespace,
 				"selector", target.LabelSelector,
@@ -84,7 +90,7 @@ func (s *Syncer) syncAll(ctx context.Context) {
 	}
 }
 
-func (s *Syncer) syncTarget(ctx context.Context, t config.Target) error {
+func (s *Syncer) syncTarget(ctx context.Context, t config.Target, strat strategy.Strategy) error {
 	pods, err := s.k8s.CoreV1().Pods(t.Namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: t.LabelSelector,
 	})
@@ -94,7 +100,7 @@ func (s *Syncer) syncTarget(ctx context.Context, t config.Target) error {
 
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if err := s.syncPod(ctx, pod, t); err != nil {
+		if err := s.syncPod(ctx, pod, t, strat); err != nil {
 			s.log.Error("pod sync failed",
 				"pod", pod.Name,
 				"namespace", pod.Namespace,
@@ -104,7 +110,7 @@ func (s *Syncer) syncTarget(ctx context.Context, t config.Target) error {
 	return nil
 }
 
-func (s *Syncer) syncPod(ctx context.Context, pod *corev1.Pod, t config.Target) error {
+func (s *Syncer) syncPod(ctx context.Context, pod *corev1.Pod, t config.Target, strat strategy.Strategy) error {
 	log := s.log.With("pod", pod.Name, "namespace", pod.Namespace)
 
 	// Skip pods not in the Running phase — Pending/Succeeded/Failed/Unknown pods
@@ -120,30 +126,27 @@ func (s *Syncer) syncPod(ctx context.Context, pod *corev1.Pod, t config.Target) 
 		return nil
 	}
 
-	cost := s.decideCost(ctx, pod, t, log)
+	cost := s.decideCost(ctx, pod, t, strat, log)
 	return s.setAnnotation(ctx, pod, cost, log)
 }
 
-func (s *Syncer) decideCost(ctx context.Context, pod *corev1.Pod, t config.Target, log *slog.Logger) int32 {
+func (s *Syncer) decideCost(ctx context.Context, pod *corev1.Pod, t config.Target, strat strategy.Strategy, log *slog.Logger) int32 {
 	cpu, err := s.metrics.PodCPU(ctx, pod.Namespace, pod.Name, t.Containers)
 	if err != nil {
 		// NotFound means metrics-server hasn't scraped this pod yet (typical right after
 		// a pod starts). Any other error is transient. In both cases protect the pod.
 		if kerrors.IsNotFound(err) {
-			log.Debug("metrics not yet available, protecting pod", "cost", s.cfg.NoMetricsCost)
+			log.Debug("metrics not yet available")
 		} else {
-			log.Warn("metrics unavailable, protecting pod", "err", err, "cost", s.cfg.NoMetricsCost)
+			log.Warn("metrics unavailable", "err", err)
 		}
-		return s.cfg.NoMetricsCost
+		cost := strat.Decide(pod, nil)
+		log.Debug("cost decided (no metrics)", "cost", cost)
+		return cost
 	}
-
-	if cpu.Cmp(s.cfg.BusyCPUThreshold) > 0 {
-		log.Debug("pod busy", "cpu", cpu.String(), "threshold", s.cfg.BusyCPUThreshold.String(), "cost", s.cfg.BusyCost)
-		return s.cfg.BusyCost
-	}
-
-	log.Debug("pod idle", "cpu", cpu.String(), "threshold", s.cfg.BusyCPUThreshold.String(), "cost", s.cfg.IdleCost)
-	return s.cfg.IdleCost
+	cost := strat.Decide(pod, &cpu)
+	log.Debug("cost decided", "cpu", cpu.String(), "cost", cost)
+	return cost
 }
 
 func (s *Syncer) setAnnotation(ctx context.Context, pod *corev1.Pod, cost int32, log *slog.Logger) error {

@@ -73,7 +73,13 @@
               "containers": {
                 "type": "array",
                 "items": { "type": "string" }
-              }
+              },
+              "strategy": {
+                "type": "string",
+                "enum": ["threshold", "escalating"]
+              },
+              "escalatingStep": { "type": "integer", "minimum": 1 },
+              "escalatingMax": { "type": "integer", "minimum": 1 }
             }
           }
         }

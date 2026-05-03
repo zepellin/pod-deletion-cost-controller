@@ -25,6 +25,15 @@ data:
         {{- else }}
         containers: []
         {{- end }}
+        {{- if .strategy }}
+        strategy: {{ .strategy | quote }}
+        {{- end }}
+        {{- if .escalatingStep }}
+        escalatingStep: {{ .escalatingStep }}
+        {{- end }}
+        {{- if .escalatingMax }}
+        escalatingMax: {{ .escalatingMax }}
+        {{- end }}
     {{- end }}
     {{- else }}
       []

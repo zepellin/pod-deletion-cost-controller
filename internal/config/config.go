@@ -24,7 +24,15 @@ type Target struct {
 	LabelSelector string   `yaml:"labelSelector"`
 	// Containers lists which container names to include when summing CPU.
 	// Empty means all containers (including native sidecars) are summed.
-	Containers    []string `yaml:"containers"`
+	Containers []string `yaml:"containers"`
+	// Strategy selects the costing algorithm: "threshold" (default) or "escalating".
+	Strategy string `yaml:"strategy"`
+	// EscalatingStep is the cost increment per busy sync cycle (escalating strategy only).
+	// Defaults to busyCost/10 when zero.
+	EscalatingStep int32 `yaml:"escalatingStep"`
+	// EscalatingMax is the cost ceiling for the escalating strategy.
+	// Defaults to 1000000 when zero.
+	EscalatingMax int32 `yaml:"escalatingMax"`
 }
 
 // Config is the parsed, validated controller configuration.
@@ -65,6 +73,14 @@ func Load(path string) (*Config, error) {
 	threshold, err := resource.ParseQuantity(r.BusyCPUThreshold)
 	if err != nil {
 		return nil, fmt.Errorf("invalid busyCPUThreshold %q: %w", r.BusyCPUThreshold, err)
+	}
+
+	for _, t := range r.Targets {
+		switch t.Strategy {
+		case "", "threshold", "escalating":
+		default:
+			return nil, fmt.Errorf("unknown strategy %q for target %s/%s", t.Strategy, t.Namespace, t.LabelSelector)
+		}
 	}
 
 	return &Config{
