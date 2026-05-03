@@ -1,4 +1,4 @@
-module github.com/mdanko/pod-deletion-cost-controller
+module github.com/zepellin/pod-deletion-cost-controller
 
 go 1.26.0
 

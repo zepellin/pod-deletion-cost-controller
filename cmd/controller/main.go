@@ -14,9 +14,9 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned"
 
-	"github.com/mdanko/pod-deletion-cost-controller/internal/config"
-	"github.com/mdanko/pod-deletion-cost-controller/internal/controller"
-	"github.com/mdanko/pod-deletion-cost-controller/internal/metrics"
+	"github.com/zepellin/pod-deletion-cost-controller/internal/config"
+	"github.com/zepellin/pod-deletion-cost-controller/internal/controller"
+	"github.com/zepellin/pod-deletion-cost-controller/internal/metrics"
 )
 
 func main() {
