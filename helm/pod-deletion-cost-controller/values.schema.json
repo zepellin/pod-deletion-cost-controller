@@ -71,6 +71,17 @@
       "type": "string",
       "enum": ["debug", "info", "warn", "error"]
     },
+    "serviceMonitor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "namespace": { "type": "string" },
+        "interval": { "type": "string" },
+        "scrapeTimeout": { "type": "string" },
+        "additionalLabels": { "type": "object" }
+      }
+    },
     "config": {
       "type": "object",
       "additionalProperties": false,

@@ -23,6 +23,7 @@ import (
 	"github.com/zepellin/pod-deletion-cost-controller/internal/config"
 	"github.com/zepellin/pod-deletion-cost-controller/internal/controller"
 	"github.com/zepellin/pod-deletion-cost-controller/internal/metrics"
+	"github.com/zepellin/pod-deletion-cost-controller/internal/telemetry"
 )
 
 func main() {
@@ -61,9 +62,10 @@ func main() {
 	}
 
 	mc := metrics.New(metricsClientset)
-	syncer := controller.New(k8sClient, mc, cfg, log)
+	rec := telemetry.NewRecorder()
+	syncer := controller.New(k8sClient, mc, cfg, log, rec)
 
-	startHealthServer(*healthAddr, log)
+	startHealthServer(*healthAddr, log, rec)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -176,7 +178,7 @@ func buildRestConfig(kubeconfigPath string) (*rest.Config, error) {
 	return cfg, nil
 }
 
-func startHealthServer(addr string, log *slog.Logger) {
+func startHealthServer(addr string, log *slog.Logger, rec *telemetry.Recorder) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -184,6 +186,7 @@ func startHealthServer(addr string, log *slog.Logger) {
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+	mux.Handle("/metrics", rec.Handler())
 	go func() {
 		if err := http.ListenAndServe(addr, mux); err != nil {
 			log.Error("health server error", "err", err)
