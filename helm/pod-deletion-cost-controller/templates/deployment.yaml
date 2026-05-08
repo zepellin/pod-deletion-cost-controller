@@ -1,3 +1,4 @@
+{{- $leaderElect := or .Values.leaderElection.enabled (gt (int .Values.replicaCount) 1) -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -38,6 +39,19 @@ spec:
             - --config=/etc/controller/config.yaml
             - --log-level={{ .Values.logLevel }}
             - --health-addr=:8080
+            - --leader-elect={{ $leaderElect }}
+            {{- if $leaderElect }}
+            - --leader-elect-namespace={{ .Release.Namespace }}
+            {{- end }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           ports:
             - name: health
               containerPort: 8080

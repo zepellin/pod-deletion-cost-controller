@@ -1,0 +1,15 @@
+{{- $leaderElect := or .Values.leaderElection.enabled (gt (int .Values.replicaCount) 1) -}}
+{{- if $leaderElect }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "pod-deletion-cost-controller.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "pod-deletion-cost-controller.labels" . | nindent 4 }}
+rules:
+  # Leader election requires get/create/update on Leases in the controller's own namespace.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+{{- end }}
