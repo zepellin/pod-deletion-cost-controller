@@ -133,14 +133,18 @@ targets:
 The controller is configured entirely through `config.*` in `values.yaml`. All other values control the Kubernetes resources themselves.
 
 | Value | Default | Description |
-|---|---|---|
+| --- | --- | --- |
 | `config.syncInterval` | `"60s"` | How often to reconcile all target pods |
 | `config.busyCPUThreshold` | `"500m"` | CPU above this = busy (Kubernetes quantity) |
 | `config.busyCost` | `10000` | Annotation value for busy pods |
 | `config.idleCost` | `0` | Annotation value for idle pods |
 | `config.noMetricsCost` | `10000` | Annotation value when metrics are unavailable |
 | `config.targets` | `[]` | List of target workloads (see above) |
-| `replicaCount` | `1` | Number of controller replicas (keep at 1; see [limitations](#limitations)) |
+| `replicaCount` | `1` | Number of replicas; leader election is auto-enabled when > 1 |
+| `leaderElection.enabled` | `false` | Force-enable leader election even with `replicaCount: 1` |
+| `podDisruptionBudget.enabled` | `false` | Create a PodDisruptionBudget |
+| `podDisruptionBudget.minAvailable` | `1` | Min pods available during disruption (integer or `"50%"`) |
+| `podDisruptionBudget.maxUnavailable` | _(unset)_ | Max pods unavailable during disruption; takes precedence over `minAvailable` when set |
 | `image.repository` | `ghcr.io/zepellin/pod-deletion-cost-controller` | Container image repository |
 | `image.tag` | Chart `appVersion` | Image tag override |
 | `logLevel` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
@@ -266,9 +270,42 @@ docker build -t pod-deletion-cost-controller:dev .
 
 **Requirements:** Go 1.26, Docker (for image build), GNU Make.
 
+## High availability
+
+Leader election is **automatically enabled when `replicaCount` is greater than 1**. Only the elected leader runs the sync loop; the others stand by and take over if the leader crashes or is evicted. No extra values need to be set — just increase the replica count:
+
+```bash
+helm install pdcc oci://ghcr.io/zepellin/charts/pod-deletion-cost-controller \
+  --version 0.1.0 \
+  --namespace pdcc-system \
+  --create-namespace \
+  --set replicaCount=2 \
+  --set config.targets[0].namespace=default \
+  --set 'config.targets[0].labelSelector=app=video-processor'
+```
+
+The current leader is visible in the `Lease` object created in the controller namespace:
+
+```bash
+kubectl get lease pod-deletion-cost-controller -n pdcc-system -o yaml
+```
+
+The Helm chart automatically creates a namespace-scoped `Role` and `RoleBinding` for `coordination.k8s.io/leases` whenever leader election is active. To force-enable leader election with a single replica (for testing), set `leaderElection.enabled: true`.
+
+### Pod disruption budget
+
+For HA deployments, consider adding a PDB so that voluntary disruptions (node drains) cannot take down all replicas simultaneously:
+
+```yaml
+replicaCount: 2
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1   # or use maxUnavailable: 1, or a percentage like "50%"
+```
+
 ## Limitations
 
-- **Single replica only.** Leader election is not implemented. Running more than one replica causes harmless annotation races (both replicas write the same value) but is wasteful. Keep `replicaCount: 1`.
+- **Single replica** (`replicaCount: 1`) disables leader election by default. This is safe — only one process runs at a time. For HA, increase `replicaCount`.
 - **CPU is the only signal.** The controller has no way to know that a pod is "busy" by other means (open file handles, queue depth, network I/O). If your workload's CPU profile during processing is similar to idle, the threshold approach will not work reliably — consider exposing a custom metric instead.
 - **metrics-server required.** If your cluster uses the Prometheus Adapter to serve `metrics.k8s.io`, verify that `kubectl top pods` works in your target namespaces. If the metrics API is unavailable, the controller logs a warning and protects all pods (sets `noMetricsCost`) until metrics recover.
 - **Annotation is not removed when a pod exits scope.** If you remove a pod's labels or change the `labelSelector`, the pod keeps its last annotation value. This is harmless — the ReplicaSet will simply not include it in deletion-cost ordering once it's no longer part of the managed set.

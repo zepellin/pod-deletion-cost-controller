@@ -1,0 +1,18 @@
+{{- $leaderElect := or .Values.leaderElection.enabled (gt (int .Values.replicaCount) 1) -}}
+{{- if $leaderElect }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "pod-deletion-cost-controller.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "pod-deletion-cost-controller.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "pod-deletion-cost-controller.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "pod-deletion-cost-controller.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

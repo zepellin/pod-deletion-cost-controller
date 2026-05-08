@@ -40,6 +40,17 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 
+# Leader election is automatically enabled when replicaCount > 1.
+# Set leaderElection.enabled: true to force it on with a single replica (e.g. during testing).
+leaderElection: {}
+
+podDisruptionBudget:
+  enabled: false
+  # minAvailable and maxUnavailable are mutually exclusive; minAvailable takes
+  # precedence if both are set. Ignored when podDisruptionBudget.enabled is false.
+  minAvailable: 1
+  # maxUnavailable: 1
+
 # log level: debug | info | warn | error
 logLevel: info
 
