@@ -51,6 +51,14 @@ podDisruptionBudget:
   minAvailable: 1
   # maxUnavailable: 1
 
+# ServiceMonitor for Prometheus Operator. Requires the monitoring.coreos.com CRD.
+serviceMonitor:
+  enabled: false
+  # namespace: monitoring   # defaults to the release namespace
+  # interval: 30s
+  # scrapeTimeout: 10s
+  # additionalLabels: {}    # extra labels to add to the ServiceMonitor (e.g. for label-based Prometheus selection)
+
 # log level: debug | info | warn | error
 logLevel: info
 

@@ -19,6 +19,7 @@ import (
 	"github.com/zepellin/pod-deletion-cost-controller/internal/config"
 	"github.com/zepellin/pod-deletion-cost-controller/internal/controller"
 	"github.com/zepellin/pod-deletion-cost-controller/internal/metrics"
+	"github.com/zepellin/pod-deletion-cost-controller/internal/telemetry"
 )
 
 // Package-level envtest state, started once for all tests in this package.
@@ -173,7 +174,7 @@ func defaultConfig(ns, selector string, containers []string) *config.Config {
 
 func newSyncer(cfg *config.Config, getter metrics.Getter) *controller.Syncer {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	return controller.New(testK8s, getter, cfg, log)
+	return controller.New(testK8s, getter, cfg, log, telemetry.NewRecorder())
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

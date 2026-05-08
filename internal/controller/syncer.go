@@ -17,6 +17,7 @@ import (
 	"github.com/zepellin/pod-deletion-cost-controller/internal/config"
 	"github.com/zepellin/pod-deletion-cost-controller/internal/metrics"
 	"github.com/zepellin/pod-deletion-cost-controller/internal/strategy"
+	"github.com/zepellin/pod-deletion-cost-controller/internal/telemetry"
 )
 
 const annotationDeletionCost = "controller.kubernetes.io/pod-deletion-cost"
@@ -37,6 +38,20 @@ func isRetryablePatchErr(err error) bool {
 		kerrors.IsServiceUnavailable(err)
 }
 
+// syncStats accumulates per-sync telemetry across all targets.
+type syncStats struct {
+	// pods maps namespace → cost_class → pod count for the current cycle.
+	pods   map[string]map[string]int
+	errors bool
+}
+
+func (s *syncStats) recordPod(namespace, costClass string) {
+	if s.pods[namespace] == nil {
+		s.pods[namespace] = make(map[string]int)
+	}
+	s.pods[namespace][costClass]++
+}
+
 // Syncer periodically reconciles pod-deletion-cost annotations for all configured targets.
 type Syncer struct {
 	k8s        kubernetes.Interface
@@ -44,14 +59,15 @@ type Syncer struct {
 	cfg        *config.Config
 	log        *slog.Logger
 	strategies []strategy.Strategy
+	rec        *telemetry.Recorder
 }
 
-func New(k8s kubernetes.Interface, mc metrics.Getter, cfg *config.Config, log *slog.Logger) *Syncer {
+func New(k8s kubernetes.Interface, mc metrics.Getter, cfg *config.Config, log *slog.Logger, rec *telemetry.Recorder) *Syncer {
 	strategies := make([]strategy.Strategy, len(cfg.Targets))
 	for i, t := range cfg.Targets {
 		strategies[i] = strategy.New(t, cfg)
 	}
-	return &Syncer{k8s: k8s, metrics: mc, cfg: cfg, log: log, strategies: strategies}
+	return &Syncer{k8s: k8s, metrics: mc, cfg: cfg, log: log, strategies: strategies, rec: rec}
 }
 
 // SyncOnce runs a single reconciliation pass across all targets.
@@ -80,17 +96,31 @@ func (s *Syncer) Run(ctx context.Context) error {
 }
 
 func (s *Syncer) syncAll(ctx context.Context) {
+	start := time.Now()
+	stats := &syncStats{pods: make(map[string]map[string]int)}
+
 	for i, target := range s.cfg.Targets {
-		if err := s.syncTarget(ctx, target, s.strategies[i]); err != nil {
+		if err := s.syncTarget(ctx, target, s.strategies[i], stats); err != nil {
+			stats.errors = true
 			s.log.Error("target sync failed",
 				"namespace", target.Namespace,
 				"selector", target.LabelSelector,
 				"err", err)
 		}
 	}
+
+	// Rebuild the pods_managed gauge from scratch each cycle so removed targets
+	// or pods don't leave stale label sets behind.
+	s.rec.ResetPodsManaged()
+	for ns, classes := range stats.pods {
+		for class, count := range classes {
+			s.rec.SetPodsManaged(ns, class, float64(count))
+		}
+	}
+	s.rec.ObserveSyncCycle(time.Since(start), stats.errors)
 }
 
-func (s *Syncer) syncTarget(ctx context.Context, t config.Target, strat strategy.Strategy) error {
+func (s *Syncer) syncTarget(ctx context.Context, t config.Target, strat strategy.Strategy, stats *syncStats) error {
 	pods, err := s.k8s.CoreV1().Pods(t.Namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: t.LabelSelector,
 	})
@@ -100,7 +130,8 @@ func (s *Syncer) syncTarget(ctx context.Context, t config.Target, strat strategy
 
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if err := s.syncPod(ctx, pod, t, strat); err != nil {
+		if err := s.syncPod(ctx, pod, t, strat, stats); err != nil {
+			stats.errors = true
 			s.log.Error("pod sync failed",
 				"pod", pod.Name,
 				"namespace", pod.Namespace,
@@ -110,7 +141,7 @@ func (s *Syncer) syncTarget(ctx context.Context, t config.Target, strat strategy
 	return nil
 }
 
-func (s *Syncer) syncPod(ctx context.Context, pod *corev1.Pod, t config.Target, strat strategy.Strategy) error {
+func (s *Syncer) syncPod(ctx context.Context, pod *corev1.Pod, t config.Target, strat strategy.Strategy, stats *syncStats) error {
 	log := s.log.With("pod", pod.Name, "namespace", pod.Namespace)
 
 	// Skip pods not in the Running phase — Pending/Succeeded/Failed/Unknown pods
@@ -126,27 +157,38 @@ func (s *Syncer) syncPod(ctx context.Context, pod *corev1.Pod, t config.Target, 
 		return nil
 	}
 
-	cost := s.decideCost(ctx, pod, t, strat, log)
+	cost, costClass := s.decideCost(ctx, pod, t, strat, log)
+	stats.recordPod(pod.Namespace, costClass)
 	return s.setAnnotation(ctx, pod, cost, log)
 }
 
-func (s *Syncer) decideCost(ctx context.Context, pod *corev1.Pod, t config.Target, strat strategy.Strategy, log *slog.Logger) int32 {
+func (s *Syncer) decideCost(ctx context.Context, pod *corev1.Pod, t config.Target, strat strategy.Strategy, log *slog.Logger) (int32, string) {
 	cpu, err := s.metrics.PodCPU(ctx, pod.Namespace, pod.Name, t.Containers)
 	if err != nil {
 		// NotFound means metrics-server hasn't scraped this pod yet (typical right after
 		// a pod starts). Any other error is transient. In both cases protect the pod.
 		if kerrors.IsNotFound(err) {
+			s.rec.RecordMetricsUnavailable(pod.Namespace, "not_found")
 			log.Debug("metrics not yet available")
 		} else {
+			s.rec.RecordMetricsUnavailable(pod.Namespace, "error")
 			log.Warn("metrics unavailable", "err", err)
 		}
 		cost := strat.Decide(pod, nil)
 		log.Debug("cost decided (no metrics)", "cost", cost)
-		return cost
+		return cost, "no_metrics"
 	}
+
+	var costClass string
+	if cpu.Cmp(s.cfg.BusyCPUThreshold) > 0 {
+		costClass = "busy"
+	} else {
+		costClass = "idle"
+	}
+
 	cost := strat.Decide(pod, &cpu)
 	log.Debug("cost decided", "cpu", cpu.String(), "cost", cost)
-	return cost
+	return cost, costClass
 }
 
 func (s *Syncer) setAnnotation(ctx context.Context, pod *corev1.Pod, cost int32, log *slog.Logger) error {
@@ -172,12 +214,15 @@ func (s *Syncer) setAnnotation(ctx context.Context, pod *corev1.Pod, cost int32,
 		return false, lastErr
 	})
 	if wait.Interrupted(err) {
+		s.rec.RecordAnnotationPatch(pod.Namespace, "error")
 		return fmt.Errorf("patch annotation: retries exhausted: %w", lastErr)
 	}
 	if err != nil {
+		s.rec.RecordAnnotationPatch(pod.Namespace, "error")
 		return fmt.Errorf("patch annotation: %w", err)
 	}
 
+	s.rec.RecordAnnotationPatch(pod.Namespace, "updated")
 	log.Info("annotation updated",
 		"from", pod.Annotations[annotationDeletionCost],
 		"to", desired)
