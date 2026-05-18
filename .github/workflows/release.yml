@@ -68,7 +68,7 @@ jobs:
         run: |
           helm package helm/pod-deletion-cost-controller \
             --version "${{ steps.version.outputs.version }}" \
-            --app-version "${{ github.ref_name }}"
+            --app-version "${{ steps.version.outputs.version }}"
 
       - name: Push Helm chart
         run: |

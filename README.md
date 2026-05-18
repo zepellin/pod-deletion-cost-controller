@@ -36,7 +36,7 @@ Install from the OCI registry (no `helm repo add` needed):
 
 ```bash
 helm install pdcc oci://ghcr.io/zepellin/charts/pod-deletion-cost-controller \
-  --version 0.1.0 \
+  --version 0.3.2 \
   --namespace pdcc-system \
   --create-namespace \
   --set config.targets[0].namespace=default \
@@ -48,7 +48,7 @@ To deploy with a custom values file instead (recommended for multiple targets):
 
 ```bash
 helm install pdcc oci://ghcr.io/zepellin/charts/pod-deletion-cost-controller \
-  --version 0.1.0 \
+  --version 0.3.2 \
   --namespace pdcc-system \
   --create-namespace \
   --values my-values.yaml
@@ -58,7 +58,7 @@ To upgrade an existing release:
 
 ```bash
 helm upgrade pdcc oci://ghcr.io/zepellin/charts/pod-deletion-cost-controller \
-  --version 0.1.0 \
+  --version 0.3.2 \
   --namespace pdcc-system \
   --values my-values.yaml
 ```
@@ -121,11 +121,21 @@ targets:
     # Leave empty to sum ALL containers (including native sidecar containers).
     # List specific names to exclude sidecar CPU from the busy calculation.
     containers: []
+    # strategy: costing algorithm to use. Default: "threshold".
+    # "threshold"  — assigns busyCost when above threshold, idleCost otherwise.
+    # "escalating" — cost increments by escalatingStep each busy sync cycle up to
+    #                escalatingMax, then resets to idleCost when idle.
+    strategy: threshold
 
   - namespace: "processing"
     labelSelector: "app=file-processor,tier=worker"
     containers:
       - main
+    strategy: escalating
+    # escalatingStep: cost added per busy sync cycle (default: busyCost / 10).
+    escalatingStep: 1000
+    # escalatingMax: cost ceiling for the escalating strategy (default: 1000000).
+    escalatingMax: 1000000
 ```
 
 ### Helm values
@@ -140,6 +150,9 @@ The controller is configured entirely through `config.*` in `values.yaml`. All o
 | `config.idleCost` | `0` | Annotation value for idle pods |
 | `config.noMetricsCost` | `10000` | Annotation value when metrics are unavailable |
 | `config.targets` | `[]` | List of target workloads (see above) |
+| `config.targets[*].strategy` | `"threshold"` | Costing algorithm: `threshold` or `escalating` (see [Strategies](#strategies)) |
+| `config.targets[*].escalatingStep` | `busyCost / 10` | Cost increment per busy sync cycle (`escalating` only) |
+| `config.targets[*].escalatingMax` | `1000000` | Cost ceiling for the escalating strategy |
 | `replicaCount` | `1` | Number of replicas; leader election is auto-enabled when > 1 |
 | `leaderElection.enabled` | `false` | Force-enable leader election even with `replicaCount: 1` |
 | `podDisruptionBudget.enabled` | `false` | Create a PodDisruptionBudget |
@@ -160,6 +173,38 @@ The `busyCPUThreshold` is the most important setting. Set it:
 - **Low enough** to catch a pod that has just started receiving work before it ramps up to full utilisation.
 
 A good starting point is to run `kubectl top pods` on your idle workload for a few minutes, take the maximum reading, and set the threshold to 2–3× that value.
+
+### Strategies
+
+Each target can use one of two costing algorithms, configured per target via the `strategy` field.
+
+**`threshold`** (default) — simple on/off assignment:
+
+- CPU > `busyCPUThreshold` → cost set to `busyCost`
+- CPU ≤ `busyCPUThreshold` → cost set to `idleCost`
+
+This is suitable for most workloads where a pod is clearly busy or idle.
+
+**`escalating`** — cost grows the longer a pod stays busy:
+
+- Each sync cycle where CPU > `busyCPUThreshold`, the cost is incremented by `escalatingStep` (default: `busyCost / 10`), up to `escalatingMax` (default: `1000000`).
+- When the pod goes idle, cost resets to `idleCost`.
+
+This gives long-running jobs stronger protection over time, so a pod that has been busy for ten sync cycles is far less likely to be evicted than one that just started processing.
+
+```yaml
+config:
+  targets:
+    - namespace: default
+      labelSelector: "app=video-processor"
+      strategy: threshold          # default, no extra fields needed
+
+    - namespace: processing
+      labelSelector: "app=file-processor,tier=worker"
+      strategy: escalating
+      escalatingStep: 1000        # cost += 1000 each busy sync cycle
+      escalatingMax: 1000000      # ceiling
+```
 
 ### Sidecar containers
 
@@ -276,7 +321,7 @@ Leader election is **automatically enabled when `replicaCount` is greater than 1
 
 ```bash
 helm install pdcc oci://ghcr.io/zepellin/charts/pod-deletion-cost-controller \
-  --version 0.1.0 \
+  --version 0.3.2 \
   --namespace pdcc-system \
   --create-namespace \
   --set replicaCount=2 \
@@ -305,7 +350,6 @@ podDisruptionBudget:
 
 ## Limitations
 
-- **Single replica** (`replicaCount: 1`) disables leader election by default. This is safe — only one process runs at a time. For HA, increase `replicaCount`.
 - **CPU is the only signal.** The controller has no way to know that a pod is "busy" by other means (open file handles, queue depth, network I/O). If your workload's CPU profile during processing is similar to idle, the threshold approach will not work reliably — consider exposing a custom metric instead.
 - **metrics-server required.** If your cluster uses the Prometheus Adapter to serve `metrics.k8s.io`, verify that `kubectl top pods` works in your target namespaces. If the metrics API is unavailable, the controller logs a warning and protects all pods (sets `noMetricsCost`) until metrics recover.
 - **Annotation is not removed when a pod exits scope.** If you remove a pod's labels or change the `labelSelector`, the pod keeps its last annotation value. This is harmless — the ReplicaSet will simply not include it in deletion-cost ordering once it's no longer part of the managed set.
