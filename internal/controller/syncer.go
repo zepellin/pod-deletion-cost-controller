@@ -128,8 +128,10 @@ func (s *Syncer) syncTarget(ctx context.Context, t config.Target, strat strategy
 		return fmt.Errorf("list pods: %w", err)
 	}
 
+	live := make(map[types.UID]bool, len(pods.Items))
 	for i := range pods.Items {
 		pod := &pods.Items[i]
+		live[pod.UID] = true
 		if err := s.syncPod(ctx, pod, t, strat, stats); err != nil {
 			stats.errors = true
 			s.log.Error("pod sync failed",
@@ -137,6 +139,12 @@ func (s *Syncer) syncTarget(ctx context.Context, t config.Target, strat strategy
 				"namespace", pod.Namespace,
 				"err", err)
 		}
+	}
+
+	// Release per-pod state for pods that have gone away. Only safe after a
+	// successful list — on a list error we must not treat every pod as deleted.
+	if p, ok := strat.(strategy.Pruner); ok {
+		p.Prune(live)
 	}
 	return nil
 }
@@ -213,12 +221,14 @@ func (s *Syncer) setAnnotation(ctx context.Context, pod *corev1.Pod, cost int32,
 		}
 		return false, lastErr
 	})
-	if wait.Interrupted(err) {
-		s.rec.RecordAnnotationPatch(pod.Namespace, "error")
-		return fmt.Errorf("patch annotation: retries exhausted: %w", lastErr)
-	}
 	if err != nil {
 		s.rec.RecordAnnotationPatch(pod.Namespace, "error")
+		// wait.Interrupted covers both "retries exhausted" and "context cancelled".
+		// lastErr is nil in the latter case if the context was already done before
+		// the first attempt, so fall back to the error the wait loop returned.
+		if wait.Interrupted(err) && lastErr != nil {
+			return fmt.Errorf("patch annotation: retries exhausted: %w", lastErr)
+		}
 		return fmt.Errorf("patch annotation: %w", err)
 	}
 

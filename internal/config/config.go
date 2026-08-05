@@ -10,18 +10,18 @@ import (
 )
 
 type raw struct {
-	SyncInterval     string    `yaml:"syncInterval"`
-	BusyCPUThreshold string    `yaml:"busyCPUThreshold"`
-	BusyCost         int32     `yaml:"busyCost"`
-	IdleCost         int32     `yaml:"idleCost"`
-	NoMetricsCost    int32     `yaml:"noMetricsCost"`
-	Targets          []Target  `yaml:"targets"`
+	SyncInterval     string   `yaml:"syncInterval"`
+	BusyCPUThreshold string   `yaml:"busyCPUThreshold"`
+	BusyCost         int32    `yaml:"busyCost"`
+	IdleCost         int32    `yaml:"idleCost"`
+	NoMetricsCost    int32    `yaml:"noMetricsCost"`
+	Targets          []Target `yaml:"targets"`
 }
 
 // Target specifies a set of pods to manage via label selector within a namespace.
 type Target struct {
-	Namespace     string   `yaml:"namespace"`
-	LabelSelector string   `yaml:"labelSelector"`
+	Namespace     string `yaml:"namespace"`
+	LabelSelector string `yaml:"labelSelector"`
 	// Containers lists which container names to include when summing CPU.
 	// Empty means all containers (including native sidecars) are summed.
 	Containers []string `yaml:"containers"`
@@ -40,9 +40,9 @@ type Config struct {
 	SyncInterval     time.Duration
 	BusyCPUThreshold resource.Quantity
 	// BusyCost is the pod-deletion-cost annotation value for pods above the CPU threshold.
-	BusyCost      int32
+	BusyCost int32
 	// IdleCost is the pod-deletion-cost annotation value for idle pods.
-	IdleCost      int32
+	IdleCost int32
 	// NoMetricsCost is the cost assigned when metrics are unavailable (pod still starting).
 	NoMetricsCost int32
 	Targets       []Target
