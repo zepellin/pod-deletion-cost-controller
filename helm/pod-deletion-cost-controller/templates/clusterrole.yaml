@@ -1,3 +1,4 @@
+{{- if and .Values.rbac.create (eq .Values.rbac.scope "cluster") }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -5,11 +6,5 @@ metadata:
   labels:
     {{- include "pod-deletion-cost-controller.labels" . | nindent 4 }}
 rules:
-  # Read pods and patch their annotations across all managed namespaces.
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch", "patch"]
-  # Read CPU metrics from the metrics-server.
-  - apiGroups: ["metrics.k8s.io"]
-    resources: ["pods"]
-    verbs: ["get", "list"]
+  {{- include "pod-deletion-cost-controller.rules" . | nindent 2 }}
+{{- end }}

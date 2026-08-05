@@ -60,6 +60,32 @@ ServiceAccount name.
 {{- end }}
 
 {{/*
+Permissions the controller needs on target pods. Shared by the ClusterRole and
+by the per-namespace Roles so the two RBAC scopes cannot drift apart.
+*/}}
+{{- define "pod-deletion-cost-controller.rules" -}}
+# Read pods and patch their annotations.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch", "patch"]
+# Read CPU metrics from the metrics-server.
+- apiGroups: ["metrics.k8s.io"]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+{{- end }}
+
+{{/*
+Distinct namespaces referenced by config.targets, sorted for stable output.
+*/}}
+{{- define "pod-deletion-cost-controller.targetNamespaces" -}}
+{{- $namespaces := dict -}}
+{{- range .Values.config.targets -}}
+{{- $_ := set $namespaces .namespace true -}}
+{{- end -}}
+{{- keys $namespaces | sortAlpha | join "," -}}
+{{- end }}
+
+{{/*
 Container image reference.
 */}}
 {{- define "pod-deletion-cost-controller.image" -}}

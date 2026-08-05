@@ -59,7 +59,7 @@ func NewRecorder() *Recorder {
 	annotationPatches := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "pdcc",
 		Name:      "annotation_patches_total",
-		Help:      "Total pod-deletion-cost annotation patches attempted, by namespace and result (updated or error).",
+		Help:      "Total pod-deletion-cost annotation patches attempted, by namespace and result (updated, gone or error).",
 	}, []string{"namespace", "result"})
 	metricsUnavailable := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "pdcc",

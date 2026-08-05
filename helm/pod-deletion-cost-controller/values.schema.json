@@ -48,6 +48,17 @@
         "enabled": { "type": "boolean" }
       }
     },
+    "rbac": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": { "type": "boolean" },
+        "scope": {
+          "type": "string",
+          "enum": ["cluster", "namespaced"]
+        }
+      }
+    },
     "podDisruptionBudget": {
       "type": "object",
       "additionalProperties": false,

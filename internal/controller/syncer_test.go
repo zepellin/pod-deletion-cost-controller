@@ -3,8 +3,11 @@ package controller_test
 import (
 	"context"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -174,12 +177,30 @@ func defaultConfig(ns, selector string, containers []string) *config.Config {
 
 func newSyncer(t *testing.T, cfg *config.Config, getter metrics.Getter) *controller.Syncer {
 	t.Helper()
+	syncer, _ := newSyncerWithRecorder(t, cfg, getter)
+	return syncer
+}
+
+func newSyncerWithRecorder(t *testing.T, cfg *config.Config, getter metrics.Getter) (*controller.Syncer, *telemetry.Recorder) {
+	t.Helper()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	syncer, err := controller.New(testK8s, getter, cfg, log, telemetry.NewRecorder())
+	rec := telemetry.NewRecorder()
+	syncer, err := controller.New(testK8s, getter, cfg, log, rec)
 	if err != nil {
 		t.Fatalf("create syncer: %v", err)
 	}
-	return syncer
+	return syncer, rec
+}
+
+// scrapeMetrics returns the recorder's Prometheus exposition text.
+func scrapeMetrics(t *testing.T, rec *telemetry.Recorder) string {
+	t.Helper()
+	w := httptest.NewRecorder()
+	rec.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("scrape metrics: status %d", w.Code)
+	}
+	return w.Body.String()
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -301,6 +322,58 @@ func TestSyncer_TerminatingPodNotUpdated(t *testing.T) {
 	if got := getDeletionCost(t, ctx, ns, pod.Name); got != "0" {
 		t.Errorf("terminating pod: annotation should remain 0, got %q", got)
 	}
+}
+
+func TestSyncer_PodDeletedMidCycleIsNotAnError(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	ns := newNamespace(t, ctx)
+
+	pod := newRunningPod(t, ctx, ns, "vanishing-pod", map[string]string{"app": "test"})
+
+	// The metrics lookup happens after the pod is listed but before it is
+	// patched, so deleting from inside the getter reproduces a pod that goes
+	// away mid-cycle — routine during the scale-down this controller influences.
+	var grace int64
+	getter := metrics.GetterFunc(func(_ context.Context, _, podName string, _ []string) (resource.Quantity, error) {
+		if err := testK8s.CoreV1().Pods(ns).Delete(ctx, podName, metav1.DeleteOptions{
+			GracePeriodSeconds: &grace,
+		}); err != nil {
+			t.Errorf("delete pod mid-cycle: %v", err)
+		}
+		return resource.MustParse("500m"), nil
+	})
+
+	syncer, rec := newSyncerWithRecorder(t, defaultConfig(ns, "app=test", nil), getter)
+	syncer.SyncOnce(ctx)
+
+	if _, err := testK8s.CoreV1().Pods(ns).Get(ctx, pod.Name, metav1.GetOptions{}); !kerrors.IsNotFound(err) {
+		t.Fatalf("pod should be gone, got err=%v", err)
+	}
+
+	body := scrapeMetrics(t, rec)
+	if want := `result="gone"`; !strings.Contains(body, want) {
+		t.Errorf("expected a patch counted as %s, got:\n%s", want, patchMetrics(body))
+	}
+	if unwanted := `result="error"`; strings.Contains(body, unwanted) {
+		t.Errorf("deleted pod must not count as an error, got:\n%s", patchMetrics(body))
+	}
+	// A cycle whose only incident was a vanished pod is a clean cycle.
+	if !strings.Contains(body, `pdcc_sync_cycles_total{result="success"} 1`) {
+		t.Errorf("expected a successful sync cycle, got:\n%s", patchMetrics(body))
+	}
+}
+
+// patchMetrics extracts the controller's own counters from an exposition body
+// for readable assertion failures.
+func patchMetrics(body string) string {
+	var out []string
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "pdcc_") {
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 func TestSyncer_LabelSelectorFilters(t *testing.T) {

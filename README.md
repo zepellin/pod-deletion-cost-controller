@@ -155,6 +155,8 @@ The controller is configured entirely through `config.*` in `values.yaml`. All o
 | `config.targets[*].escalatingMax` | `1000000` | Cost ceiling for the escalating strategy |
 | `replicaCount` | `1` | Number of replicas; leader election is auto-enabled when > 1 |
 | `leaderElection.enabled` | `false` | Force-enable leader election even with `replicaCount: 1` |
+| `rbac.create` | `true` | Create the Role/ClusterRole and bindings (see [RBAC](#rbac)) |
+| `rbac.scope` | `cluster` | `cluster` for one ClusterRole, `namespaced` for a Role per target namespace |
 | `podDisruptionBudget.enabled` | `false` | Create a PodDisruptionBudget |
 | `podDisruptionBudget.minAvailable` | `1` | Min pods available during disruption (integer or `"50%"`) |
 | `podDisruptionBudget.maxUnavailable` | _(unset)_ | Max pods unavailable during disruption; takes precedence over `minAvailable` when set |
@@ -169,6 +171,15 @@ The controller is configured entirely through `config.*` in `values.yaml`. All o
 | `resources.requests.cpu` | `50m` | Controller CPU request |
 | `resources.requests.memory` | `64Mi` | Controller memory request |
 | `resources.limits.memory` | `128Mi` | Controller memory limit |
+| `serviceAccount.create` | `true` | Create a ServiceAccount for the controller |
+| `serviceAccount.name` | _(generated)_ | ServiceAccount name; defaults to the fullname template |
+| `serviceAccount.annotations` | `{}` | Annotations on the ServiceAccount (e.g. for IRDA/Workload Identity) |
+| `podSecurityContext` | `runAsNonRoot`, uid/gid `65532` | Pod-level security context |
+| `securityContext` | no privilege escalation, read-only rootfs, all capabilities dropped | Container-level security context |
+| `podAnnotations` | `{}` | Extra annotations on the controller pod |
+| `nodeSelector` / `tolerations` / `affinity` | `{}` / `[]` / `{}` | Standard scheduling controls |
+| `imagePullSecrets` | `[]` | Pull secrets for a private registry |
+| `nameOverride` / `fullnameOverride` | `""` | Override the generated resource names |
 
 ### Tuning the CPU threshold
 
@@ -299,7 +310,7 @@ The controller serves health and Prometheus endpoints on `--health-addr` (`:8080
 | `pdcc_sync_cycles_total` | counter | `result` (`success`, `partial_error`) | Sync cycles completed |
 | `pdcc_sync_duration_seconds` | histogram | — | Duration of a full sync across all targets |
 | `pdcc_pods_managed` | gauge | `namespace`, `cost_class` (`idle`, `busy`, `no_metrics`) | Running pods under management, rebuilt each cycle |
-| `pdcc_annotation_patches_total` | counter | `namespace`, `result` (`updated`, `error`) | Annotation patches attempted |
+| `pdcc_annotation_patches_total` | counter | `namespace`, `result` (`updated`, `gone`, `error`) | Annotation patches attempted; `gone` means the pod was deleted mid-cycle, which is routine |
 | `pdcc_metrics_unavailable_total` | counter | `namespace`, `reason` (`not_found`, `error`) | Pods whose CPU metrics could not be read |
 | `pdcc_leader` | gauge | — | `1` if this replica is running the sync loop, `0` if standing by |
 | `pdcc_last_sync_timestamp_seconds` | gauge | — | Unix timestamp of the last completed sync cycle |
@@ -319,7 +330,7 @@ Useful starting alerts: `pdcc_sync_cycles_total{result="partial_error"}` increas
 
 ## RBAC
 
-The Helm chart creates a `ClusterRole` with the following permissions, bound to the controller's `ServiceAccount`:
+The controller needs exactly these permissions on target pods, and no write access to any other resource type:
 
 ```yaml
 rules:
@@ -331,7 +342,27 @@ rules:
     verbs: ["get", "list"]
 ```
 
-The `ClusterRole` is required because `targets` can reference pods in any namespace. No write access to any other resource type is needed.
+`rbac.scope` controls how widely they are granted:
+
+| Scope | What is created | When to use it |
+| --- | --- | --- |
+| `cluster` (default) | One `ClusterRole` + `ClusterRoleBinding` covering every namespace | Targets span many namespaces, or you add targets in namespaces that don't exist yet |
+| `namespaced` | A `Role` + `RoleBinding` in each namespace named by `config.targets` | Least privilege — the controller can only touch pods in namespaces you named |
+
+```yaml
+rbac:
+  scope: namespaced
+config:
+  targets:
+    - namespace: team-a
+      labelSelector: "app=encoder"
+    - namespace: team-b
+      labelSelector: "app=transcoder"
+```
+
+Two constraints apply to `namespaced` scope: every target namespace must **already exist** when the chart is installed, and adding a target later requires a `helm upgrade` so its namespace gets a `Role` — otherwise the controller logs `list pods: ... is forbidden` for that target on every cycle and leaves those pods unannotated. Rendering fails fast if `config.targets` is empty, since the controller would be granted access to nothing.
+
+Set `rbac.create: false` to manage all of the above yourself. Leader election additionally needs `get`/`create`/`update` on `coordination.k8s.io/leases` in the release namespace; the chart creates that `Role` whenever leader election is active.
 
 ## Building from source
 
@@ -393,3 +424,8 @@ podDisruptionBudget:
 - **metrics-server required.** If your cluster uses the Prometheus Adapter to serve `metrics.k8s.io`, verify that `kubectl top pods` works in your target namespaces. If the metrics API is unavailable, the controller logs a warning and protects all pods (sets `noMetricsCost`) until metrics recover.
 - **`escalating` counters are in-memory.** They are held only by the running leader, so a controller restart or a leader failover resets every pod's escalation to `escalatingStep` on the next cycle. Pods keep their last annotation value until then, so protection is never lost — only the accumulated head start.
 - **Annotation is not removed when a pod exits scope.** If you remove a pod's labels or change the `labelSelector`, the pod keeps its last annotation value. This is harmless — the ReplicaSet will simply not include it in deletion-cost ordering once it's no longer part of the managed set.
+- **Polling, not watching.** Each cycle lists target pods rather than maintaining a watch, so a pod that becomes busy is only noticed at the next tick — worst case one full `syncInterval` late. Listings are served from the API server's watch cache rather than etcd, which keeps the cost low, but a very short `syncInterval` across very large namespaces will still generate meaningful API traffic.
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE).

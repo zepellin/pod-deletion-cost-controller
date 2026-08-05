@@ -123,6 +123,11 @@ func (s *Syncer) SyncOnce(ctx context.Context) {
 func (s *Syncer) syncTarget(ctx context.Context, t config.Target, strat strategy.Strategy, stats *syncStats) error {
 	pods, err := s.k8s.CoreV1().Pods(t.Namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: t.LabelSelector,
+		// Serve from the API server's watch cache instead of doing a quorum read
+		// from etcd. The result may lag by a fraction of a second, which is
+		// harmless here: a stale annotation value only costs one redundant patch,
+		// and the patch itself is idempotent.
+		ResourceVersion: "0",
 	})
 	if err != nil {
 		return fmt.Errorf("list pods: %w", err)
@@ -214,6 +219,13 @@ func (s *Syncer) setAnnotation(ctx context.Context, pod *corev1.Pod, cost int32,
 		}
 		return false, lastErr
 	})
+	// The pod was deleted between the list and the patch. Routine during
+	// scale-down — exactly what this controller influences — so it is not an error.
+	if kerrors.IsNotFound(lastErr) {
+		s.rec.RecordAnnotationPatch(pod.Namespace, "gone")
+		log.Debug("skip: pod deleted before patch")
+		return nil
+	}
 	if err != nil {
 		s.rec.RecordAnnotationPatch(pod.Namespace, "error")
 		// wait.Interrupted covers both "retries exhausted" and "context cancelled".

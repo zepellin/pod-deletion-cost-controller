@@ -41,6 +41,33 @@ jobs:
             --set 'config.targets[0].strategy=escalating' \
             --set 'config.targets[0].escalatingStep=1000'
 
+      - name: Render templates (namespaced RBAC scope)
+        run: |
+          helm template pdcc helm/pod-deletion-cost-controller \
+            --set rbac.scope=namespaced \
+            --set 'config.targets[0].namespace=team-a' \
+            --set 'config.targets[0].labelSelector=tier=worker' \
+            --set 'config.targets[1].namespace=team-b' \
+            --set 'config.targets[1].labelSelector=tier=worker' \
+            | tee /tmp/namespaced.yaml
+          # Namespaced scope must produce per-namespace Roles and no ClusterRole.
+          if grep -q '^kind: ClusterRole' /tmp/namespaced.yaml; then
+            echo "ERROR: ClusterRole rendered despite rbac.scope=namespaced"
+            exit 1
+          fi
+          for ns in team-a team-b; do
+            grep -q "namespace: $ns" /tmp/namespaced.yaml || {
+              echo "ERROR: no RBAC rendered for namespace $ns"; exit 1; }
+          done
+
+      - name: Reject namespaced RBAC scope without targets
+        run: |
+          if helm template pdcc helm/pod-deletion-cost-controller \
+              --set rbac.scope=namespaced >/dev/null 2>&1; then
+            echo "ERROR: expected rendering to fail with no targets"
+            exit 1
+          fi
+
   helm-install:
     name: Helm install test
     runs-on: ubuntu-latest
