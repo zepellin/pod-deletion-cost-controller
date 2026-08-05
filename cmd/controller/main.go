@@ -99,7 +99,10 @@ func run() error {
 	}
 
 	rec := telemetry.NewRecorder()
-	syncer := controller.New(k8sClient, metrics.New(metricsClientset), cfg, log, rec)
+	syncer, err := controller.New(k8sClient, metrics.New(metricsClientset), cfg, log, rec)
+	if err != nil {
+		return fmt.Errorf("create syncer: %w", err)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
