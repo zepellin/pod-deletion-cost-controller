@@ -11,7 +11,7 @@ jobs:
     name: Helm lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Lint chart (threshold strategy)
         run: |
@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: helm-lint
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install kind
         run: |
