@@ -12,6 +12,10 @@ import (
 // This gives long-running busy pods progressively stronger deletion protection than
 // pods that only recently became busy — useful when restarting a job that has been
 // processing for a long time is more costly than restarting one that just started.
+//
+// Per-pod counters are held in memory only: they are released by Prune once a pod
+// disappears, and are lost entirely on restart or leader failover (an escalated
+// pod starts again from Step on the next cycle).
 type Escalating struct {
 	CPUThreshold  resource.Quantity
 	Step          int32
@@ -38,4 +42,15 @@ func (e *Escalating) Decide(pod *corev1.Pod, cpu *resource.Quantity) int32 {
 	}
 	delete(e.costs, pod.UID)
 	return e.ResetCost
+}
+
+// Prune drops counters for pods that are no longer present. Without this, a pod
+// that is deleted while busy — the normal end state for job-style workloads —
+// would leave its entry behind for the lifetime of the process.
+func (e *Escalating) Prune(live map[types.UID]bool) {
+	for uid := range e.costs {
+		if !live[uid] {
+			delete(e.costs, uid)
+		}
+	}
 }

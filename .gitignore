@@ -1,0 +1,2 @@
+# Build and test artifacts (bin/controller, setup-envtest, envtest assets).
+/bin/

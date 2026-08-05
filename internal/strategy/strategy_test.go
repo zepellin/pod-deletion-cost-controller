@@ -89,6 +89,33 @@ func TestEscalating_ResetsOnIdle(t *testing.T) {
 	}
 }
 
+func TestEscalating_PruneDropsMissingPods(t *testing.T) {
+	s := &strategy.Escalating{CPUThreshold: threshold100m, Step: 3000, Max: 9000, ResetCost: 0, NoMetricsCost: 10000}
+	p1, p2 := pod("p1"), pod("p2")
+	cpu := ptr(resource.MustParse("500m"))
+
+	s.Decide(p1, cpu) // p1: 3000
+	s.Decide(p1, cpu) // p1: 6000
+	s.Decide(p2, cpu) // p2: 3000
+
+	// p1 is gone (e.g. deleted while still busy); p2 is still around.
+	s.Prune(map[types.UID]bool{"p2": true})
+
+	// p1's counter was released, so it starts over.
+	if got := s.Decide(p1, cpu); got != 3000 {
+		t.Errorf("pruned pod: want 3000 (counter released), got %d", got)
+	}
+	// p2 was retained and continues escalating.
+	if got := s.Decide(p2, cpu); got != 6000 {
+		t.Errorf("retained pod: want 6000, got %d", got)
+	}
+}
+
+func TestEscalating_PruneOnNilStateIsSafe(t *testing.T) {
+	s := &strategy.Escalating{CPUThreshold: threshold100m, Step: 3000, Max: 9000}
+	s.Prune(map[types.UID]bool{"p1": true}) // must not panic before first Decide
+}
+
 func TestEscalating_IndependentPerPod(t *testing.T) {
 	s := &strategy.Escalating{CPUThreshold: threshold100m, Step: 3000, Max: 9000, ResetCost: 0, NoMetricsCost: 10000}
 	p1, p2 := pod("p1"), pod("p2")

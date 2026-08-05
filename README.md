@@ -161,6 +161,11 @@ The controller is configured entirely through `config.*` in `values.yaml`. All o
 | `image.repository` | `ghcr.io/zepellin/pod-deletion-cost-controller` | Container image repository |
 | `image.tag` | Chart `appVersion` | Image tag override |
 | `logLevel` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
+| `serviceMonitor.enabled` | `false` | Create a Prometheus Operator `ServiceMonitor` (see [Observability](#observability)) |
+| `serviceMonitor.namespace` | _(release namespace)_ | Namespace to create the `ServiceMonitor` in |
+| `serviceMonitor.interval` | `30s` | Scrape interval |
+| `serviceMonitor.scrapeTimeout` | `10s` | Scrape timeout |
+| `serviceMonitor.additionalLabels` | `{}` | Extra labels on the `ServiceMonitor` |
 | `resources.requests.cpu` | `50m` | Controller CPU request |
 | `resources.requests.memory` | `64Mi` | Controller memory request |
 | `resources.limits.memory` | `128Mi` | Controller memory limit |
@@ -273,10 +278,44 @@ helm upgrade pdcc ./helm/pod-deletion-cost-controller \
 Log output is structured JSON (one line per event):
 
 ```json
-{"time":"...","level":"DEBUG","msg":"pod busy","pod":"worker-abc","namespace":"default","cpu":"450m","threshold":"100m","cost":10000}
-{"time":"...","level":"DEBUG","msg":"pod idle","pod":"worker-xyz","namespace":"default","cpu":"8m","threshold":"100m","cost":0}
-{"time":"...","level":"DEBUG","msg":"metrics not yet available, protecting pod","pod":"worker-new","namespace":"default","cost":10000}
+{"time":"...","level":"DEBUG","msg":"cost decided","pod":"worker-abc","namespace":"default","cpu":"450m","cost":10000}
+{"time":"...","level":"DEBUG","msg":"cost decided","pod":"worker-xyz","namespace":"default","cpu":"8m","cost":0}
+{"time":"...","level":"DEBUG","msg":"metrics not yet available","pod":"worker-new","namespace":"default"}
+{"time":"...","level":"INFO","msg":"annotation updated","pod":"worker-xyz","namespace":"default","from":"10000","to":"0"}
 ```
+
+## Observability
+
+The controller serves health and Prometheus endpoints on `--health-addr` (`:8080` by default, exposed as the `metrics` port on the chart's headless Service).
+
+| Endpoint | Purpose |
+| --- | --- |
+| `/healthz` | Liveness. Fails once the **leader** has gone without completing a sync cycle for `max(3 × syncInterval, 2m)`, so a wedged controller is restarted. Standby replicas always pass — they are not syncing by design. |
+| `/readyz` | Readiness. Succeeds whenever the process is serving, including on standby replicas, so their metrics keep being scraped. |
+| `/metrics` | Prometheus exposition, including standard Go runtime and process collectors. |
+
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `pdcc_sync_cycles_total` | counter | `result` (`success`, `partial_error`) | Sync cycles completed |
+| `pdcc_sync_duration_seconds` | histogram | — | Duration of a full sync across all targets |
+| `pdcc_pods_managed` | gauge | `namespace`, `cost_class` (`idle`, `busy`, `no_metrics`) | Running pods under management, rebuilt each cycle |
+| `pdcc_annotation_patches_total` | counter | `namespace`, `result` (`updated`, `error`) | Annotation patches attempted |
+| `pdcc_metrics_unavailable_total` | counter | `namespace`, `reason` (`not_found`, `error`) | Pods whose CPU metrics could not be read |
+| `pdcc_leader` | gauge | — | `1` if this replica is running the sync loop, `0` if standing by |
+| `pdcc_last_sync_timestamp_seconds` | gauge | — | Unix timestamp of the last completed sync cycle |
+
+To scrape with the Prometheus Operator, enable the bundled `ServiceMonitor`:
+
+```yaml
+serviceMonitor:
+  enabled: true
+  # namespace: monitoring    # defaults to the release namespace
+  # interval: 30s
+  # scrapeTimeout: 10s
+  # additionalLabels: {}     # e.g. labels your Prometheus selects on
+```
+
+Useful starting alerts: `pdcc_sync_cycles_total{result="partial_error"}` increasing, or `time() - pdcc_last_sync_timestamp_seconds` exceeding a few sync intervals while `pdcc_leader == 1`.
 
 ## RBAC
 
@@ -352,4 +391,5 @@ podDisruptionBudget:
 
 - **CPU is the only signal.** The controller has no way to know that a pod is "busy" by other means (open file handles, queue depth, network I/O). If your workload's CPU profile during processing is similar to idle, the threshold approach will not work reliably — consider exposing a custom metric instead.
 - **metrics-server required.** If your cluster uses the Prometheus Adapter to serve `metrics.k8s.io`, verify that `kubectl top pods` works in your target namespaces. If the metrics API is unavailable, the controller logs a warning and protects all pods (sets `noMetricsCost`) until metrics recover.
+- **`escalating` counters are in-memory.** They are held only by the running leader, so a controller restart or a leader failover resets every pod's escalation to `escalatingStep` on the next cycle. Pods keep their last annotation value until then, so protection is never lost — only the accumulated head start.
 - **Annotation is not removed when a pod exits scope.** If you remove a pod's labels or change the `labelSelector`, the pod keeps its last annotation value. This is harmless — the ReplicaSet will simply not include it in deletion-cost ordering once it's no longer part of the managed set.
