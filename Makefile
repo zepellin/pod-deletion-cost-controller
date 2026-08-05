@@ -1,7 +1,10 @@
-BIN_DIR            := bin
+BIN_DIR             := bin
 ENVTEST_K8S_VERSION := 1.33.x
-ENVTEST_BIN        := $(BIN_DIR)/setup-envtest
-ENVTEST_ASSETS     := $(BIN_DIR)/envtest-assets
+ENVTEST_ASSETS      := $(BIN_DIR)/envtest-assets
+
+# setup-envtest is pinned by the tool directive in go.mod, so `go tool` builds
+# the same version every run and Renovate can see it. Nothing to install.
+ENVTEST := go tool setup-envtest
 
 .PHONY: all build fmt lint test test-unit test-integration clean
 
@@ -28,16 +31,11 @@ test-unit:
 		./internal/strategy/... ./internal/telemetry/...
 
 # Full test suite including envtest integration tests.
-test: test-unit $(ENVTEST_BIN)
-	KUBEBUILDER_ASSETS="$$($(ENVTEST_BIN) use $(ENVTEST_K8S_VERSION) \
+test: test-unit
+	@mkdir -p $(ENVTEST_ASSETS)
+	KUBEBUILDER_ASSETS="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) \
 		--bin-dir $(abspath $(ENVTEST_ASSETS)) -p path)" \
 		go test ./...
-
-# Download the setup-envtest tool if not present.
-$(ENVTEST_BIN):
-	@mkdir -p $(BIN_DIR) $(ENVTEST_ASSETS)
-	GOBIN=$(abspath $(BIN_DIR)) go install \
-		sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
 
 clean:
 	rm -rf $(BIN_DIR)

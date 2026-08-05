@@ -41,8 +41,22 @@ tolerations: []
 affinity: {}
 
 # Leader election is automatically enabled when replicaCount > 1.
-# Set leaderElection.enabled: true to force it on with a single replica (e.g. during testing).
-leaderElection: {}
+# Set enabled: true to force it on with a single replica (e.g. during testing).
+leaderElection:
+  enabled: false
+
+rbac:
+  # Create the Role/ClusterRole and bindings the controller needs.
+  # Disable only if you manage RBAC out of band.
+  create: true
+  # scope: how widely the controller is granted pod get/list/watch/patch.
+  #   cluster    — one ClusterRole covering every namespace. Works with any
+  #                target, including namespaces created after install.
+  #   namespaced — a Role and RoleBinding in each namespace named by
+  #                config.targets. Least privilege, but every target namespace
+  #                must already exist at install time, and adding a target
+  #                requires a helm upgrade to grant access to its namespace.
+  scope: cluster
 
 podDisruptionBudget:
   enabled: false
