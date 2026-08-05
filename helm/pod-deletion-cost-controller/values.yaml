@@ -108,10 +108,12 @@ config:
   #     # Use this to exclude sidecar CPU from the busy decision.
   #     containers: []
   #     # strategy selects the costing algorithm (default: "threshold").
-  #     # "threshold"  — fixed busyCost when above threshold, idleCost otherwise.
-  #     # "escalating" — cost increments by escalatingStep each busy sync cycle,
-  #     #                up to escalatingMax; resets to idleCost when idle.
-  #     #                Gives long-running busy pods stronger protection over time.
+  #     # "threshold"           — fixed busyCost when above threshold, idleCost otherwise.
+  #     # "escalating"          — cost increments by escalatingStep each busy sync cycle,
+  #     #                         up to escalatingMax; resets to idleCost when idle.
+  #     #                         Gives long-running busy pods stronger protection over time.
+  #     # "escalating-weighted" — same, but the increment is scaled by CPU usage, so a pod
+  #     #                         burning 1000m gains 10x more per cycle than one at 100m.
   #     strategy: threshold
   #
   #   - namespace: processing
@@ -121,5 +123,15 @@ config:
   #     strategy: escalating
   #     # escalatingStep: cost added per busy sync cycle (default: busyCost/10).
   #     escalatingStep: 1000
-  #     # escalatingMax: cost ceiling for the escalating strategy (default: 1000000).
+  #     # escalatingMax: cost ceiling for the escalating strategies (default: 1000000).
+  #     escalatingMax: 1000000
+  #
+  #   - namespace: rendering
+  #     labelSelector: "app=renderer"
+  #     strategy: escalating-weighted
+  #     # escalatingStep is the cost added per cycle for a pod at escalatingCPUReference;
+  #     # pods above or below that get proportionally more or less.
+  #     escalatingStep: 1000
+  #     # escalatingCPUReference: usage that earns a full step (default: "1000m", one core).
+  #     escalatingCPUReference: "1000m"
   #     escalatingMax: 1000000

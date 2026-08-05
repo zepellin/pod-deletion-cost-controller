@@ -41,6 +41,24 @@ jobs:
             --set 'config.targets[0].strategy=escalating' \
             --set 'config.targets[0].escalatingStep=1000'
 
+      - name: Lint chart (escalating-weighted strategy)
+        run: |
+          helm lint helm/pod-deletion-cost-controller \
+            --set 'config.targets[0].namespace=default' \
+            --set 'config.targets[0].labelSelector=tier=worker' \
+            --set 'config.targets[0].strategy=escalating-weighted' \
+            --set 'config.targets[0].escalatingStep=1000' \
+            --set 'config.targets[0].escalatingCPUReference=1000m'
+
+      - name: Render templates (escalating-weighted strategy)
+        run: |
+          helm template pdcc helm/pod-deletion-cost-controller \
+            --set 'config.targets[0].namespace=default' \
+            --set 'config.targets[0].labelSelector=tier=worker' \
+            --set 'config.targets[0].strategy=escalating-weighted' \
+            --set 'config.targets[0].escalatingStep=1000' \
+            --set 'config.targets[0].escalatingCPUReference=1000m'
+
       - name: Render templates (namespaced RBAC scope)
         run: |
           helm template pdcc helm/pod-deletion-cost-controller \

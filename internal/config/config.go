@@ -27,14 +27,19 @@ type Target struct {
 	// Containers lists which container names to include when summing CPU.
 	// Empty means all containers (including native sidecars) are summed.
 	Containers []string `yaml:"containers"`
-	// Strategy selects the costing algorithm: "threshold" (default) or "escalating".
+	// Strategy selects the costing algorithm: "threshold" (default), "escalating"
+	// or "escalating-weighted".
 	Strategy string `yaml:"strategy"`
-	// EscalatingStep is the cost increment per busy sync cycle (escalating strategy only).
+	// EscalatingStep is the cost increment per busy sync cycle (escalating strategies only).
+	// Under escalating-weighted it is the increment for a pod at escalatingCPUReference.
 	// Defaults to busyCost/10 when zero.
 	EscalatingStep int32 `yaml:"escalatingStep"`
-	// EscalatingMax is the cost ceiling for the escalating strategy.
+	// EscalatingMax is the cost ceiling for the escalating strategies.
 	// Defaults to 1000000 when zero.
 	EscalatingMax int32 `yaml:"escalatingMax"`
+	// EscalatingCPUReference is the CPU quantity that earns a full escalatingStep
+	// per cycle under escalating-weighted. Defaults to "1000m" (one core) when empty.
+	EscalatingCPUReference string `yaml:"escalatingCPUReference"`
 }
 
 // Config is the parsed, validated controller configuration.
@@ -54,7 +59,7 @@ type Config struct {
 // into the inputs strategy.New expects. Defaulting of the escalating fields is
 // left to the strategy package.
 func (c *Config) StrategyParams(t Target) strategy.Params {
-	return strategy.Params{
+	p := strategy.Params{
 		CPUThreshold:   c.BusyCPUThreshold,
 		BusyCost:       c.BusyCost,
 		IdleCost:       c.IdleCost,
@@ -62,6 +67,28 @@ func (c *Config) StrategyParams(t Target) strategy.Params {
 		EscalatingStep: t.EscalatingStep,
 		EscalatingMax:  t.EscalatingMax,
 	}
+	// Unparseable or non-positive references are rejected by Load, so anything
+	// that fails here can only be a hand-built Target: fall back to the default.
+	if q, err := parseCPUReference(t); err == nil {
+		p.EscalatingCPUReference = q
+	}
+	return p
+}
+
+// parseCPUReference parses a target's escalatingCPUReference. An empty value
+// yields the zero quantity, which the strategy package reads as "use the default".
+func parseCPUReference(t Target) (resource.Quantity, error) {
+	if t.EscalatingCPUReference == "" {
+		return resource.Quantity{}, nil
+	}
+	q, err := resource.ParseQuantity(t.EscalatingCPUReference)
+	if err != nil {
+		return resource.Quantity{}, fmt.Errorf("invalid escalatingCPUReference %q: %w", t.EscalatingCPUReference, err)
+	}
+	if q.MilliValue() <= 0 {
+		return resource.Quantity{}, fmt.Errorf("escalatingCPUReference %q must be greater than zero", t.EscalatingCPUReference)
+	}
+	return q, nil
 }
 
 func Load(path string) (*Config, error) {
@@ -93,6 +120,9 @@ func Load(path string) (*Config, error) {
 
 	for _, t := range r.Targets {
 		if err := strategy.Validate(t.Strategy); err != nil {
+			return nil, fmt.Errorf("target %s/%s: %w", t.Namespace, t.LabelSelector, err)
+		}
+		if _, err := parseCPUReference(t); err != nil {
 			return nil, fmt.Errorf("target %s/%s: %w", t.Namespace, t.LabelSelector, err)
 		}
 	}

@@ -549,3 +549,47 @@ func TestSyncer_EscalatingStrategy(t *testing.T) {
 		t.Errorf("after idle: want 0, got %q", got)
 	}
 }
+
+func TestSyncer_EscalatingWeightedStrategy(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	ns := newNamespace(t, ctx)
+
+	heavy := newRunningPod(t, ctx, ns, "heavy-pod", map[string]string{"app": "test"})
+	light := newRunningPod(t, ctx, ns, "light-pod", map[string]string{"app": "test"})
+
+	// heavy runs at 5x the light pod, so it must accumulate 5x the cost per cycle.
+	getter := cpuGetter(map[string]string{heavy.Name: "1000m", light.Name: "200m"})
+
+	cfg := &config.Config{
+		BusyCPUThreshold: resource.MustParse("100m"),
+		BusyCost:         10000,
+		IdleCost:         0,
+		NoMetricsCost:    10000,
+		Targets: []config.Target{{
+			Namespace:              ns,
+			LabelSelector:          "app=test",
+			Strategy:               "escalating-weighted",
+			EscalatingStep:         1000,
+			EscalatingMax:          9000,
+			EscalatingCPUReference: "1000m",
+		}},
+	}
+	syncer := newSyncer(t, cfg, getter)
+
+	syncer.SyncOnce(ctx)
+	if got := getDeletionCost(t, ctx, ns, heavy.Name); got != "1000" {
+		t.Errorf("heavy tick 1: want 1000, got %q", got)
+	}
+	if got := getDeletionCost(t, ctx, ns, light.Name); got != "200" {
+		t.Errorf("light tick 1: want 200, got %q", got)
+	}
+
+	syncer.SyncOnce(ctx)
+	if got := getDeletionCost(t, ctx, ns, heavy.Name); got != "2000" {
+		t.Errorf("heavy tick 2: want 2000, got %q", got)
+	}
+	if got := getDeletionCost(t, ctx, ns, light.Name); got != "400" {
+		t.Errorf("light tick 2: want 400, got %q", got)
+	}
+}
