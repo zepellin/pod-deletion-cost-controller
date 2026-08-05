@@ -173,6 +173,60 @@ func TestStrategyParams(t *testing.T) {
 	}
 }
 
+func TestStrategyParams_CPUReference(t *testing.T) {
+	cfg := &config.Config{BusyCPUThreshold: resource.MustParse("250m")}
+
+	got := cfg.StrategyParams(config.Target{EscalatingCPUReference: "500m"})
+	if want := resource.MustParse("500m"); got.EscalatingCPUReference.Cmp(want) != 0 {
+		t.Errorf("EscalatingCPUReference: got %s, want 500m", got.EscalatingCPUReference.String())
+	}
+	// Empty stays zero so the strategy package applies its own default.
+	if got := cfg.StrategyParams(config.Target{}); !got.EscalatingCPUReference.IsZero() {
+		t.Errorf("empty reference: got %s, want zero", got.EscalatingCPUReference.String())
+	}
+}
+
+func TestLoad_InvalidCPUReferenceRejected(t *testing.T) {
+	for _, value := range []string{"not-a-quantity", "0", "-100m"} {
+		path := writeConfig(t, fmt.Sprintf(`
+targets:
+  - namespace: ns1
+    labelSelector: "app=foo"
+    strategy: escalating-weighted
+    escalatingCPUReference: %q
+`, value))
+		_, err := config.Load(path)
+		if err == nil {
+			t.Errorf("escalatingCPUReference %q: expected error, got nil", value)
+			continue
+		}
+		if !strings.Contains(err.Error(), "ns1/app=foo") {
+			t.Errorf("escalatingCPUReference %q: error %q should name the target", value, err)
+		}
+	}
+}
+
+func TestLoad_ParsesCPUReference(t *testing.T) {
+	path := writeConfig(t, `
+targets:
+  - namespace: ns1
+    labelSelector: "app=foo"
+    strategy: escalating-weighted
+    escalatingStep: 500
+    escalatingCPUReference: "2"
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.Targets[0].EscalatingCPUReference; got != "2" {
+		t.Errorf("EscalatingCPUReference: got %q, want \"2\"", got)
+	}
+	if got := cfg.StrategyParams(cfg.Targets[0]); got.EscalatingCPUReference.MilliValue() != 2000 {
+		t.Errorf("StrategyParams reference: got %dm, want 2000m", got.EscalatingCPUReference.MilliValue())
+	}
+}
+
 func TestLoad_FileNotFound(t *testing.T) {
 	_, err := config.Load("/nonexistent/path/config.yaml")
 	if err == nil {

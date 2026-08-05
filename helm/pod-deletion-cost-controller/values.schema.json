@@ -124,10 +124,11 @@
               },
               "strategy": {
                 "type": "string",
-                "enum": ["threshold", "escalating"]
+                "enum": ["threshold", "escalating", "escalating-weighted"]
               },
               "escalatingStep": { "type": "integer", "minimum": 1 },
-              "escalatingMax": { "type": "integer", "minimum": 1 }
+              "escalatingMax": { "type": "integer", "minimum": 1 },
+              "escalatingCPUReference": { "type": "string", "minLength": 1 }
             }
           }
         }

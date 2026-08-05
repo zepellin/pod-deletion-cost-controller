@@ -122,9 +122,11 @@ targets:
     # List specific names to exclude sidecar CPU from the busy calculation.
     containers: []
     # strategy: costing algorithm to use. Default: "threshold".
-    # "threshold"  — assigns busyCost when above threshold, idleCost otherwise.
-    # "escalating" — cost increments by escalatingStep each busy sync cycle up to
-    #                escalatingMax, then resets to idleCost when idle.
+    # "threshold"           — assigns busyCost when above threshold, idleCost otherwise.
+    # "escalating"          — cost increments by escalatingStep each busy sync cycle up to
+    #                         escalatingMax, then resets to idleCost when idle.
+    # "escalating-weighted" — same, but the increment is scaled by how much CPU the pod
+    #                         is using, so heavier pods escalate faster.
     strategy: threshold
 
   - namespace: "processing"
@@ -134,7 +136,17 @@ targets:
     strategy: escalating
     # escalatingStep: cost added per busy sync cycle (default: busyCost / 10).
     escalatingStep: 1000
-    # escalatingMax: cost ceiling for the escalating strategy (default: 1000000).
+    # escalatingMax: cost ceiling for the escalating strategies (default: 1000000).
+    escalatingMax: 1000000
+
+  - namespace: "rendering"
+    labelSelector: "app=renderer"
+    strategy: escalating-weighted
+    # Under escalating-weighted, escalatingStep is the cost added per cycle for a pod
+    # running at escalatingCPUReference; heavier pods gain proportionally more.
+    escalatingStep: 1000
+    # escalatingCPUReference: usage that earns a full step (default: "1000m", one core).
+    escalatingCPUReference: "1000m"
     escalatingMax: 1000000
 ```
 
@@ -150,9 +162,10 @@ The controller is configured entirely through `config.*` in `values.yaml`. All o
 | `config.idleCost` | `0` | Annotation value for idle pods |
 | `config.noMetricsCost` | `10000` | Annotation value when metrics are unavailable |
 | `config.targets` | `[]` | List of target workloads (see above) |
-| `config.targets[*].strategy` | `"threshold"` | Costing algorithm: `threshold` or `escalating` (see [Strategies](#strategies)) |
-| `config.targets[*].escalatingStep` | `busyCost / 10` | Cost increment per busy sync cycle (`escalating` only) |
-| `config.targets[*].escalatingMax` | `1000000` | Cost ceiling for the escalating strategy |
+| `config.targets[*].strategy` | `"threshold"` | Costing algorithm: `threshold`, `escalating` or `escalating-weighted` (see [Strategies](#strategies)) |
+| `config.targets[*].escalatingStep` | `busyCost / 10` | Cost increment per busy sync cycle (escalating strategies only) |
+| `config.targets[*].escalatingMax` | `1000000` | Cost ceiling for the escalating strategies |
+| `config.targets[*].escalatingCPUReference` | `"1000m"` | CPU usage that earns a full `escalatingStep` (`escalating-weighted` only) |
 | `replicaCount` | `1` | Number of replicas; leader election is auto-enabled when > 1 |
 | `leaderElection.enabled` | `false` | Force-enable leader election even with `replicaCount: 1` |
 | `rbac.create` | `true` | Create the Role/ClusterRole and bindings (see [RBAC](#rbac)) |
@@ -192,7 +205,7 @@ A good starting point is to run `kubectl top pods` on your idle workload for a f
 
 ### Strategies
 
-Each target can use one of two costing algorithms, configured per target via the `strategy` field.
+Each target can use one of three costing algorithms, configured per target via the `strategy` field.
 
 **`threshold`** (default) — simple on/off assignment:
 
@@ -208,6 +221,15 @@ This is suitable for most workloads where a pod is clearly busy or idle.
 
 This gives long-running jobs stronger protection over time, so a pod that has been busy for ten sync cycles is far less likely to be evicted than one that just started processing.
 
+**`escalating-weighted`** — cost grows with how _hard_ the pod is working, not just how long:
+
+- Each sync cycle where CPU > `busyCPUThreshold`, the cost is incremented by `escalatingStep × (CPU ÷ escalatingCPUReference)`, up to `escalatingMax`.
+- `escalatingCPUReference` (default: `1000m`, one core) is the usage that earns exactly one full step, so `escalatingStep` reads as "cost per core-cycle". With the default reference, a pod at `1000m` gains ten times as much per cycle as a pod at `100m`.
+- A busy pod always gains at least `1`, so a pod just above the threshold still escalates rather than sitting at zero.
+- When the pod goes idle, cost resets to `idleCost`, exactly as with `escalating`.
+
+Use this when the _amount of work already done_ is what makes a restart expensive: a pod chewing through a full core has more in flight to lose than one idling just above the busy threshold.
+
 ```yaml
 config:
   targets:
@@ -220,7 +242,24 @@ config:
       strategy: escalating
       escalatingStep: 1000        # cost += 1000 each busy sync cycle
       escalatingMax: 1000000      # ceiling
+
+    - namespace: rendering
+      labelSelector: "app=renderer"
+      strategy: escalating-weighted
+      escalatingStep: 1000            # cost added per cycle at the reference usage
+      escalatingCPUReference: "1000m" # a pod at 1 core gains 1000/cycle, at 200m gains 200
+      escalatingMax: 1000000
 ```
+
+Worked example with the settings above — two pods busy for the same three cycles:
+
+| Cycle | `renderer-a` @ `2000m` | `renderer-b` @ `250m` |
+| --- | --- | --- |
+| 1 | 2000 | 250 |
+| 2 | 4000 | 500 |
+| 3 | 6000 | 750 |
+
+If the cluster autoscaler needs to remove one, `renderer-b` is the cheaper choice at every point.
 
 ### Sidecar containers
 
@@ -422,7 +461,7 @@ podDisruptionBudget:
 
 - **CPU is the only signal.** The controller has no way to know that a pod is "busy" by other means (open file handles, queue depth, network I/O). If your workload's CPU profile during processing is similar to idle, the threshold approach will not work reliably — consider exposing a custom metric instead.
 - **metrics-server required.** If your cluster uses the Prometheus Adapter to serve `metrics.k8s.io`, verify that `kubectl top pods` works in your target namespaces. If the metrics API is unavailable, the controller logs a warning and protects all pods (sets `noMetricsCost`) until metrics recover.
-- **`escalating` counters are in-memory.** They are held only by the running leader, so a controller restart or a leader failover resets every pod's escalation to `escalatingStep` on the next cycle. Pods keep their last annotation value until then, so protection is never lost — only the accumulated head start.
+- **Escalating counters are in-memory.** They are held only by the running leader, so a controller restart or a leader failover resets every pod's escalation to a single increment on the next cycle. This applies to both `escalating` and `escalating-weighted`. Pods keep their last annotation value until then, so protection is never lost — only the accumulated head start.
 - **Annotation is not removed when a pod exits scope.** If you remove a pod's labels or change the `labelSelector`, the pod keeps its last annotation value. This is harmless — the ReplicaSet will simply not include it in deletion-cost ordering once it's no longer part of the managed set.
 - **Polling, not watching.** Each cycle lists target pods rather than maintaining a watch, so a pod that becomes busy is only noticed at the next tick — worst case one full `syncInterval` late. Listings are served from the API server's watch cache rather than etcd, which keeps the cost low, but a very short `syncInterval` across very large namespaces will still generate meaningful API traffic.
 
