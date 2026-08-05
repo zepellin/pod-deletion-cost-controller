@@ -172,9 +172,14 @@ func defaultConfig(ns, selector string, containers []string) *config.Config {
 	}
 }
 
-func newSyncer(cfg *config.Config, getter metrics.Getter) *controller.Syncer {
+func newSyncer(t *testing.T, cfg *config.Config, getter metrics.Getter) *controller.Syncer {
+	t.Helper()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	return controller.New(testK8s, getter, cfg, log, telemetry.NewRecorder())
+	syncer, err := controller.New(testK8s, getter, cfg, log, telemetry.NewRecorder())
+	if err != nil {
+		t.Fatalf("create syncer: %v", err)
+	}
+	return syncer
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -187,7 +192,7 @@ func TestSyncer_IdlePod(t *testing.T) {
 	pod := newRunningPod(t, ctx, ns, "idle-pod", map[string]string{"app": "test"})
 
 	// 5m is well below the 100m threshold.
-	syncer := newSyncer(defaultConfig(ns, "app=test", nil), cpuGetter(map[string]string{pod.Name: "5m"}))
+	syncer := newSyncer(t, defaultConfig(ns, "app=test", nil), cpuGetter(map[string]string{pod.Name: "5m"}))
 	syncer.SyncOnce(ctx)
 
 	if got := getDeletionCost(t, ctx, ns, pod.Name); got != "0" {
@@ -203,7 +208,7 @@ func TestSyncer_BusyPod(t *testing.T) {
 	pod := newRunningPod(t, ctx, ns, "busy-pod", map[string]string{"app": "test"})
 
 	// 500m is above the 100m threshold.
-	syncer := newSyncer(defaultConfig(ns, "app=test", nil), cpuGetter(map[string]string{pod.Name: "500m"}))
+	syncer := newSyncer(t, defaultConfig(ns, "app=test", nil), cpuGetter(map[string]string{pod.Name: "500m"}))
 	syncer.SyncOnce(ctx)
 
 	if got := getDeletionCost(t, ctx, ns, pod.Name); got != "10000" {
@@ -219,7 +224,7 @@ func TestSyncer_NoMetricsPod(t *testing.T) {
 	pod := newRunningPod(t, ctx, ns, "starting-pod", map[string]string{"app": "test"})
 
 	// Empty map → pod not found in metrics → noMetricsCost applied.
-	syncer := newSyncer(defaultConfig(ns, "app=test", nil), cpuGetter(map[string]string{}))
+	syncer := newSyncer(t, defaultConfig(ns, "app=test", nil), cpuGetter(map[string]string{}))
 	syncer.SyncOnce(ctx)
 
 	if got := getDeletionCost(t, ctx, ns, pod.Name); got != "10000" {
@@ -235,7 +240,7 @@ func TestSyncer_TransientMetricsError(t *testing.T) {
 	pod := newRunningPod(t, ctx, ns, "error-pod", map[string]string{"app": "test"})
 
 	// Non-NotFound error → still protects the pod.
-	syncer := newSyncer(defaultConfig(ns, "app=test", nil), transientErrorGetter())
+	syncer := newSyncer(t, defaultConfig(ns, "app=test", nil), transientErrorGetter())
 	syncer.SyncOnce(ctx)
 
 	if got := getDeletionCost(t, ctx, ns, pod.Name); got != "10000" {
@@ -250,7 +255,7 @@ func TestSyncer_PendingPodNotAnnotated(t *testing.T) {
 
 	pod := newPendingPod(t, ctx, ns, "pending-pod", map[string]string{"app": "test"})
 
-	syncer := newSyncer(defaultConfig(ns, "app=test", nil), cpuGetter(map[string]string{pod.Name: "500m"}))
+	syncer := newSyncer(t, defaultConfig(ns, "app=test", nil), cpuGetter(map[string]string{pod.Name: "500m"}))
 	syncer.SyncOnce(ctx)
 
 	if got := getDeletionCost(t, ctx, ns, pod.Name); got != "" {
@@ -268,7 +273,7 @@ func TestSyncer_TerminatingPodNotUpdated(t *testing.T) {
 	pod := newRunningPod(t, ctx, ns, "terminating-pod", map[string]string{"app": "test"}, finalizer)
 
 	// First sync → pod is running, gets idleCost.
-	syncer := newSyncer(defaultConfig(ns, "app=test", nil), cpuGetter(map[string]string{pod.Name: "5m"}))
+	syncer := newSyncer(t, defaultConfig(ns, "app=test", nil), cpuGetter(map[string]string{pod.Name: "5m"}))
 	syncer.SyncOnce(ctx)
 	if got := getDeletionCost(t, ctx, ns, pod.Name); got != "0" {
 		t.Fatalf("pre-termination: want annotation=0, got %q", got)
@@ -290,7 +295,7 @@ func TestSyncer_TerminatingPodNotUpdated(t *testing.T) {
 	})
 
 	// Second sync with high CPU — annotation must NOT change because pod is terminating.
-	syncer2 := newSyncer(defaultConfig(ns, "app=test", nil), cpuGetter(map[string]string{pod.Name: "900m"}))
+	syncer2 := newSyncer(t, defaultConfig(ns, "app=test", nil), cpuGetter(map[string]string{pod.Name: "900m"}))
 	syncer2.SyncOnce(ctx)
 
 	if got := getDeletionCost(t, ctx, ns, pod.Name); got != "0" {
@@ -306,7 +311,7 @@ func TestSyncer_LabelSelectorFilters(t *testing.T) {
 	// Pod with label "app=worker" — the target selector is "app=processor", so it's excluded.
 	pod := newRunningPod(t, ctx, ns, "other-pod", map[string]string{"app": "worker"})
 
-	syncer := newSyncer(defaultConfig(ns, "app=processor", nil), cpuGetter(map[string]string{pod.Name: "500m"}))
+	syncer := newSyncer(t, defaultConfig(ns, "app=processor", nil), cpuGetter(map[string]string{pod.Name: "500m"}))
 	syncer.SyncOnce(ctx)
 
 	if got := getDeletionCost(t, ctx, ns, pod.Name); got != "" {
@@ -325,7 +330,7 @@ func TestSyncer_ContainerFilterPassedToGetter(t *testing.T) {
 	getter := cpuGetterWithCapture("500m", &gotContainers)
 
 	cfg := defaultConfig(ns, "app=test", []string{"main"})
-	newSyncer(cfg, getter).SyncOnce(ctx)
+	newSyncer(t, cfg, getter).SyncOnce(ctx)
 
 	if !reflect.DeepEqual(gotContainers, []string{"main"}) {
 		t.Errorf("container filter: getter received %v, want [main]", gotContainers)
@@ -360,7 +365,7 @@ func TestSyncer_MultipleTargets(t *testing.T) {
 		pod2.Name: "500m", // busy
 	})
 
-	newSyncer(cfg, getter).SyncOnce(ctx)
+	newSyncer(t, cfg, getter).SyncOnce(ctx)
 
 	if got := getDeletionCost(t, ctx, ns1, pod1.Name); got != "0" {
 		t.Errorf("ns1 pod1 idle: want 0, got %q", got)
@@ -378,7 +383,7 @@ func TestSyncer_Idempotent(t *testing.T) {
 	pod := newRunningPod(t, ctx, ns, "idempotent-pod", map[string]string{"app": "test"})
 
 	getter := cpuGetter(map[string]string{pod.Name: "500m"})
-	syncer := newSyncer(defaultConfig(ns, "app=test", nil), getter)
+	syncer := newSyncer(t, defaultConfig(ns, "app=test", nil), getter)
 
 	syncer.SyncOnce(ctx)
 	if got := getDeletionCost(t, ctx, ns, pod.Name); got != "10000" {
@@ -400,13 +405,13 @@ func TestSyncer_TransitionBusyToIdle(t *testing.T) {
 	pod := newRunningPod(t, ctx, ns, "transition-pod", map[string]string{"app": "test"})
 
 	// Start busy.
-	newSyncer(defaultConfig(ns, "app=test", nil), cpuGetter(map[string]string{pod.Name: "500m"})).SyncOnce(ctx)
+	newSyncer(t, defaultConfig(ns, "app=test", nil), cpuGetter(map[string]string{pod.Name: "500m"})).SyncOnce(ctx)
 	if got := getDeletionCost(t, ctx, ns, pod.Name); got != "10000" {
 		t.Fatalf("busy: want 10000, got %q", got)
 	}
 
 	// Now idle — annotation must flip.
-	newSyncer(defaultConfig(ns, "app=test", nil), cpuGetter(map[string]string{pod.Name: "5m"})).SyncOnce(ctx)
+	newSyncer(t, defaultConfig(ns, "app=test", nil), cpuGetter(map[string]string{pod.Name: "5m"})).SyncOnce(ctx)
 	if got := getDeletionCost(t, ctx, ns, pod.Name); got != "0" {
 		t.Errorf("after going idle: want 0, got %q", got)
 	}
@@ -441,7 +446,7 @@ func TestSyncer_EscalatingStrategy(t *testing.T) {
 			EscalatingMax:  9000,
 		}},
 	}
-	syncer := newSyncer(cfg, getter)
+	syncer := newSyncer(t, cfg, getter)
 
 	syncer.SyncOnce(ctx)
 	if got := getDeletionCost(t, ctx, ns, pod.Name); got != "3000" {

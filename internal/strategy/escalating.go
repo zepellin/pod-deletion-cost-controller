@@ -1,7 +1,6 @@
 package strategy
 
 import (
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -25,23 +24,23 @@ type Escalating struct {
 	costs         map[types.UID]int32
 }
 
-func (e *Escalating) Decide(pod *corev1.Pod, cpu *resource.Quantity) int32 {
+func (e *Escalating) Decide(uid types.UID, cpu *resource.Quantity) Decision {
 	if e.costs == nil {
 		e.costs = make(map[types.UID]int32)
 	}
 	if cpu == nil {
-		return e.NoMetricsCost
+		return Decision{Cost: e.NoMetricsCost, Class: ClassNoMetrics}
 	}
 	if cpu.Cmp(e.CPUThreshold) > 0 {
-		next := e.costs[pod.UID] + e.Step
+		next := e.costs[uid] + e.Step
 		if next > e.Max {
 			next = e.Max
 		}
-		e.costs[pod.UID] = next
-		return next
+		e.costs[uid] = next
+		return Decision{Cost: next, Class: ClassBusy}
 	}
-	delete(e.costs, pod.UID)
-	return e.ResetCost
+	delete(e.costs, uid)
+	return Decision{Cost: e.ResetCost, Class: ClassIdle}
 }
 
 // Prune drops counters for pods that are no longer present. Without this, a pod

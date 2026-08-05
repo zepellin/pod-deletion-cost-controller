@@ -1,14 +1,17 @@
 package config_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/zepellin/pod-deletion-cost-controller/internal/config"
+	"github.com/zepellin/pod-deletion-cost-controller/internal/strategy"
 )
 
 func writeConfig(t *testing.T, content string) string {
@@ -107,6 +110,66 @@ func TestLoad_InvalidCPUThreshold(t *testing.T) {
 	_, err := config.Load(path)
 	if err == nil {
 		t.Fatal("expected error for invalid busyCPUThreshold, got nil")
+	}
+}
+
+func TestLoad_UnknownStrategyRejected(t *testing.T) {
+	path := writeConfig(t, `
+targets:
+  - namespace: ns1
+    labelSelector: "app=foo"
+    strategy: bogus
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for unknown strategy, got nil")
+	}
+	// The error should identify both the offending target and the bad name.
+	for _, want := range []string{"ns1/app=foo", `"bogus"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err, want)
+		}
+	}
+}
+
+func TestLoad_KnownStrategiesAccepted(t *testing.T) {
+	for _, name := range append(strategy.Names(), "") {
+		path := writeConfig(t, fmt.Sprintf(`
+targets:
+  - namespace: ns1
+    labelSelector: "app=foo"
+    strategy: %q
+`, name))
+		if _, err := config.Load(path); err != nil {
+			t.Errorf("strategy %q: unexpected error %v", name, err)
+		}
+	}
+}
+
+func TestStrategyParams(t *testing.T) {
+	cfg := &config.Config{
+		BusyCPUThreshold: resource.MustParse("250m"),
+		BusyCost:         10000,
+		IdleCost:         -500,
+		NoMetricsCost:    7000,
+	}
+	target := config.Target{EscalatingStep: 250, EscalatingMax: 900}
+
+	got := cfg.StrategyParams(target)
+	want := strategy.Params{
+		CPUThreshold:   resource.MustParse("250m"),
+		BusyCost:       10000,
+		IdleCost:       -500,
+		NoMetricsCost:  7000,
+		EscalatingStep: 250,
+		EscalatingMax:  900,
+	}
+	if got.CPUThreshold.Cmp(want.CPUThreshold) != 0 {
+		t.Errorf("CPUThreshold: got %v, want %v", got.CPUThreshold, want.CPUThreshold)
+	}
+	got.CPUThreshold, want.CPUThreshold = resource.Quantity{}, resource.Quantity{}
+	if got != want {
+		t.Errorf("StrategyParams: got %+v, want %+v", got, want)
 	}
 }
 

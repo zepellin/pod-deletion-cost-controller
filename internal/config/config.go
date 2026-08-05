@@ -7,6 +7,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/api/resource"
+
+	"github.com/zepellin/pod-deletion-cost-controller/internal/strategy"
 )
 
 type raw struct {
@@ -48,6 +50,20 @@ type Config struct {
 	Targets       []Target
 }
 
+// StrategyParams translates the global settings plus one target's overrides
+// into the inputs strategy.New expects. Defaulting of the escalating fields is
+// left to the strategy package.
+func (c *Config) StrategyParams(t Target) strategy.Params {
+	return strategy.Params{
+		CPUThreshold:   c.BusyCPUThreshold,
+		BusyCost:       c.BusyCost,
+		IdleCost:       c.IdleCost,
+		NoMetricsCost:  c.NoMetricsCost,
+		EscalatingStep: t.EscalatingStep,
+		EscalatingMax:  t.EscalatingMax,
+	}
+}
+
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -76,10 +92,8 @@ func Load(path string) (*Config, error) {
 	}
 
 	for _, t := range r.Targets {
-		switch t.Strategy {
-		case "", "threshold", "escalating":
-		default:
-			return nil, fmt.Errorf("unknown strategy %q for target %s/%s", t.Strategy, t.Namespace, t.LabelSelector)
+		if err := strategy.Validate(t.Strategy); err != nil {
+			return nil, fmt.Errorf("target %s/%s: %w", t.Namespace, t.LabelSelector, err)
 		}
 	}
 

@@ -62,25 +62,23 @@ type Syncer struct {
 	rec        *telemetry.Recorder
 }
 
-func New(k8s kubernetes.Interface, mc metrics.Getter, cfg *config.Config, log *slog.Logger, rec *telemetry.Recorder) *Syncer {
+func New(k8s kubernetes.Interface, mc metrics.Getter, cfg *config.Config, log *slog.Logger, rec *telemetry.Recorder) (*Syncer, error) {
 	strategies := make([]strategy.Strategy, len(cfg.Targets))
 	for i, t := range cfg.Targets {
-		strategies[i] = strategy.New(t, cfg)
+		strat, err := strategy.New(t.Strategy, cfg.StrategyParams(t))
+		if err != nil {
+			return nil, fmt.Errorf("target %s/%s: %w", t.Namespace, t.LabelSelector, err)
+		}
+		strategies[i] = strat
 	}
-	return &Syncer{k8s: k8s, metrics: mc, cfg: cfg, log: log, strategies: strategies, rec: rec}
-}
-
-// SyncOnce runs a single reconciliation pass across all targets.
-// Useful for testing; the Run loop calls this on each tick.
-func (s *Syncer) SyncOnce(ctx context.Context) {
-	s.syncAll(ctx)
+	return &Syncer{k8s: k8s, metrics: mc, cfg: cfg, log: log, strategies: strategies, rec: rec}, nil
 }
 
 // Run blocks, syncing on every tick, until ctx is cancelled.
 func (s *Syncer) Run(ctx context.Context) error {
 	s.log.Info("syncer started", "interval", s.cfg.SyncInterval, "targets", len(s.cfg.Targets))
 
-	s.syncAll(ctx)
+	s.SyncOnce(ctx)
 
 	ticker := time.NewTicker(s.cfg.SyncInterval)
 	defer ticker.Stop()
@@ -90,12 +88,14 @@ func (s *Syncer) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			s.syncAll(ctx)
+			s.SyncOnce(ctx)
 		}
 	}
 }
 
-func (s *Syncer) syncAll(ctx context.Context) {
+// SyncOnce runs a single reconciliation pass across all targets. Run calls it
+// on every tick; tests call it directly.
+func (s *Syncer) SyncOnce(ctx context.Context) {
 	start := time.Now()
 	stats := &syncStats{pods: make(map[string]map[string]int)}
 
@@ -165,12 +165,12 @@ func (s *Syncer) syncPod(ctx context.Context, pod *corev1.Pod, t config.Target, 
 		return nil
 	}
 
-	cost, costClass := s.decideCost(ctx, pod, t, strat, log)
-	stats.recordPod(pod.Namespace, costClass)
-	return s.setAnnotation(ctx, pod, cost, log)
+	d := s.decide(ctx, pod, t, strat, log)
+	stats.recordPod(pod.Namespace, d.Class)
+	return s.setAnnotation(ctx, pod, d.Cost, log)
 }
 
-func (s *Syncer) decideCost(ctx context.Context, pod *corev1.Pod, t config.Target, strat strategy.Strategy, log *slog.Logger) (int32, string) {
+func (s *Syncer) decide(ctx context.Context, pod *corev1.Pod, t config.Target, strat strategy.Strategy, log *slog.Logger) strategy.Decision {
 	cpu, err := s.metrics.PodCPU(ctx, pod.Namespace, pod.Name, t.Containers)
 	if err != nil {
 		// NotFound means metrics-server hasn't scraped this pod yet (typical right after
@@ -182,21 +182,14 @@ func (s *Syncer) decideCost(ctx context.Context, pod *corev1.Pod, t config.Targe
 			s.rec.RecordMetricsUnavailable(pod.Namespace, "error")
 			log.Warn("metrics unavailable", "err", err)
 		}
-		cost := strat.Decide(pod, nil)
-		log.Debug("cost decided (no metrics)", "cost", cost)
-		return cost, "no_metrics"
+		d := strat.Decide(pod.UID, nil)
+		log.Debug("cost decided (no metrics)", "cost", d.Cost, "class", d.Class)
+		return d
 	}
 
-	var costClass string
-	if cpu.Cmp(s.cfg.BusyCPUThreshold) > 0 {
-		costClass = "busy"
-	} else {
-		costClass = "idle"
-	}
-
-	cost := strat.Decide(pod, &cpu)
-	log.Debug("cost decided", "cpu", cpu.String(), "cost", cost)
-	return cost, costClass
+	d := strat.Decide(pod.UID, &cpu)
+	log.Debug("cost decided", "cpu", cpu.String(), "cost", d.Cost, "class", d.Class)
+	return d
 }
 
 func (s *Syncer) setAnnotation(ctx context.Context, pod *corev1.Pod, cost int32, log *slog.Logger) error {

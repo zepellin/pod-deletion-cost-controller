@@ -1,8 +1,8 @@
 package strategy
 
 import (
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // Threshold assigns a fixed BusyCost when CPU exceeds the threshold, IdleCost otherwise.
@@ -14,12 +14,12 @@ type Threshold struct {
 	NoMetricsCost int32
 }
 
-func (t *Threshold) Decide(_ *corev1.Pod, cpu *resource.Quantity) int32 {
+func (t *Threshold) Decide(_ types.UID, cpu *resource.Quantity) Decision {
 	if cpu == nil {
-		return t.NoMetricsCost
+		return Decision{Cost: t.NoMetricsCost, Class: ClassNoMetrics}
 	}
 	if cpu.Cmp(t.CPUThreshold) > 0 {
-		return t.BusyCost
+		return Decision{Cost: t.BusyCost, Class: ClassBusy}
 	}
-	return t.IdleCost
+	return Decision{Cost: t.IdleCost, Class: ClassIdle}
 }
