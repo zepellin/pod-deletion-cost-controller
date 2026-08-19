@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # The syntax directive guarantees a frontend that understands the cache mounts below.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
 WORKDIR /src
 
 COPY go.mod go.sum ./
