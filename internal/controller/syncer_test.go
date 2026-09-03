@@ -58,6 +58,7 @@ func TestMain(m *testing.M) {
 
 const (
 	annotationKey = "controller.kubernetes.io/pod-deletion-cost"
+	taskStateKey  = "pdcc/task-state"
 	defaultBusy   = int32(10000)
 	defaultIdle   = int32(0)
 	defaultNoMet  = int32(10000)
@@ -130,6 +131,15 @@ func getDeletionCost(t *testing.T, ctx context.Context, ns, name string) string 
 		t.Fatalf("get pod %s: %v", name, err)
 	}
 	return pod.Annotations[annotationKey]
+}
+
+func getTaskState(t *testing.T, ctx context.Context, ns, name string) string {
+	t.Helper()
+	pod, err := testK8s.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get pod %s: %v", name, err)
+	}
+	return pod.Labels[taskStateKey]
 }
 
 // cpuGetter returns a GetterFunc that returns pre-set CPU per pod name.
@@ -221,6 +231,21 @@ func TestSyncer_IdlePod(t *testing.T) {
 	}
 }
 
+func TestSyncer_IdlePodTaskStateLabel(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	ns := newNamespace(t, ctx)
+
+	pod := newRunningPod(t, ctx, ns, "idle-pod", map[string]string{"app": "test"})
+
+	syncer := newSyncer(t, defaultConfig(ns, "app=test", nil), cpuGetter(map[string]string{pod.Name: "5m"}))
+	syncer.SyncOnce(ctx)
+
+	if got := getTaskState(t, ctx, ns, pod.Name); got != "idle" {
+		t.Errorf("idle pod: want label=idle, got %q", got)
+	}
+}
+
 func TestSyncer_BusyPod(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -237,6 +262,21 @@ func TestSyncer_BusyPod(t *testing.T) {
 	}
 }
 
+func TestSyncer_BusyPodTaskStateLabel(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	ns := newNamespace(t, ctx)
+
+	pod := newRunningPod(t, ctx, ns, "busy-pod", map[string]string{"app": "test"})
+
+	syncer := newSyncer(t, defaultConfig(ns, "app=test", nil), cpuGetter(map[string]string{pod.Name: "500m"}))
+	syncer.SyncOnce(ctx)
+
+	if got := getTaskState(t, ctx, ns, pod.Name); got != "busy" {
+		t.Errorf("busy pod: want label=busy, got %q", got)
+	}
+}
+
 func TestSyncer_NoMetricsPod(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -250,6 +290,11 @@ func TestSyncer_NoMetricsPod(t *testing.T) {
 
 	if got := getDeletionCost(t, ctx, ns, pod.Name); got != "10000" {
 		t.Errorf("no-metrics pod: want annotation=10000, got %q", got)
+	}
+	// No metrics yet means the pod is still starting, not idle — it should
+	// carry the same task-state label as a busy pod.
+	if got := getTaskState(t, ctx, ns, pod.Name); got != "busy" {
+		t.Errorf("no-metrics pod: want label=busy, got %q", got)
 	}
 }
 
@@ -487,6 +532,9 @@ func TestSyncer_TransitionBusyToIdle(t *testing.T) {
 	newSyncer(t, defaultConfig(ns, "app=test", nil), cpuGetter(map[string]string{pod.Name: "5m"})).SyncOnce(ctx)
 	if got := getDeletionCost(t, ctx, ns, pod.Name); got != "0" {
 		t.Errorf("after going idle: want 0, got %q", got)
+	}
+	if got := getTaskState(t, ctx, ns, pod.Name); got != "idle" {
+		t.Errorf("after going idle: want label=idle, got %q", got)
 	}
 }
 
