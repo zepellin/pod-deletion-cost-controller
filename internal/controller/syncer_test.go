@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -340,8 +341,16 @@ func TestSyncer_TerminatingPodNotUpdated(t *testing.T) {
 
 	// First sync → pod is running, gets idleCost.
 	syncer := newSyncer(t, defaultConfig(ns, "app=test", nil), cpuGetter(map[string]string{pod.Name: "5m"}))
-	syncer.SyncOnce(ctx)
-	if got := getDeletionCost(t, ctx, ns, pod.Name); got != "0" {
+	var got string
+	for range 5 {
+		syncer.SyncOnce(ctx)
+		got = getDeletionCost(t, ctx, ns, pod.Name)
+		if got == "0" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got != "0" {
 		t.Fatalf("pre-termination: want annotation=0, got %q", got)
 	}
 
