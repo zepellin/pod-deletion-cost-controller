@@ -22,6 +22,29 @@ import (
 
 const annotationDeletionCost = "controller.kubernetes.io/pod-deletion-cost"
 
+// labelTaskState mirrors the deletion-cost decision as a label, so it can be
+// used in a label selector — e.g. a PodDisruptionBudget with minAvailable:
+// 100% scoped to idle pods, to keep voluntary disruptions (node drains,
+// cluster-autoscaler/Karpenter consolidation) from taking down more idle
+// capacity than the workload can currently spare.
+const labelTaskState = "pdcc/task-state"
+
+const (
+	taskStateBusy = "busy"
+	taskStateIdle = "idle"
+)
+
+// taskState collapses a strategy decision's cost class into the two-state
+// label value. ClassNoMetrics folds into busy: metrics not being available yet
+// means the pod is still starting, not that it has finished its work, so it
+// gets the same protection posture as an actively busy pod.
+func taskState(class string) string {
+	if class == strategy.ClassIdle {
+		return taskStateIdle
+	}
+	return taskStateBusy
+}
+
 // patchBackoff is used when the API server signals it is overloaded (429 / 503 / timeout).
 // Five attempts: ~200 ms → 400 ms → 800 ms → 1.6 s → 3.2 s, capped at 8 s.
 var patchBackoff = wait.Backoff{
@@ -172,7 +195,7 @@ func (s *Syncer) syncPod(ctx context.Context, pod *corev1.Pod, t config.Target, 
 
 	d := s.decide(ctx, pod, t, strat, log)
 	stats.recordPod(pod.Namespace, d.Class)
-	return s.setAnnotation(ctx, pod, d.Cost, log)
+	return s.reconcilePod(ctx, pod, d, log)
 }
 
 func (s *Syncer) decide(ctx context.Context, pod *corev1.Pod, t config.Target, strat strategy.Strategy, log *slog.Logger) strategy.Decision {
@@ -197,13 +220,17 @@ func (s *Syncer) decide(ctx context.Context, pod *corev1.Pod, t config.Target, s
 	return d
 }
 
-func (s *Syncer) setAnnotation(ctx context.Context, pod *corev1.Pod, cost int32, log *slog.Logger) error {
-	desired := strconv.FormatInt(int64(cost), 10)
-	if pod.Annotations[annotationDeletionCost] == desired {
+func (s *Syncer) reconcilePod(ctx context.Context, pod *corev1.Pod, d strategy.Decision, log *slog.Logger) error {
+	desiredCost := strconv.FormatInt(int64(d.Cost), 10)
+	desiredState := taskState(d.Class)
+	if pod.Annotations[annotationDeletionCost] == desiredCost && pod.Labels[labelTaskState] == desiredState {
 		return nil
 	}
 
-	patch := fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, annotationDeletionCost, desired)
+	patch := fmt.Sprintf(
+		`{"metadata":{"annotations":{%q:%q},"labels":{%q:%q}}}`,
+		annotationDeletionCost, desiredCost, labelTaskState, desiredState,
+	)
 
 	var lastErr error
 	err := wait.ExponentialBackoffWithContext(ctx, patchBackoff, func(ctx context.Context) (bool, error) {
@@ -238,8 +265,8 @@ func (s *Syncer) setAnnotation(ctx context.Context, pod *corev1.Pod, cost int32,
 	}
 
 	s.rec.RecordAnnotationPatch(pod.Namespace, "updated")
-	log.Info("annotation updated",
-		"from", pod.Annotations[annotationDeletionCost],
-		"to", desired)
+	log.Info("pod state updated",
+		"cost_from", pod.Annotations[annotationDeletionCost], "cost_to", desiredCost,
+		"state_from", pod.Labels[labelTaskState], "state_to", desiredState)
 	return nil
 }

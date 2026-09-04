@@ -4,6 +4,8 @@ A Kubernetes controller that prevents HPA scale-down from terminating pods that 
 
 It does this by continuously annotating pods with [`controller.kubernetes.io/pod-deletion-cost`](https://kubernetes.io/docs/concepts/workloads/controllers/replicaset/#pod-deletion-cost) based on their real-time CPU usage. The ReplicaSet controller uses this annotation when choosing which pod to remove during scale-down: **lower cost = preferred for deletion**. Busy pods get a high cost so they are spared; idle pods get a low cost so they are picked first.
 
+Alongside the annotation, each pod is also labeled `pdcc/task-state: busy` or `pdcc/task-state: idle`. The annotation only influences *which* pod a ReplicaSet picks when its replica count is reduced — it has no effect on voluntary disruptions (node drains, cluster-autoscaler/Karpenter consolidation), which go through the Eviction API and are governed by PodDisruptionBudgets instead. The label lets you write a PDB that participates in that decision, e.g. one scoped to `pdcc/task-state: idle` with `minAvailable: 100%`, so voluntary disruptions can't take down more idle capacity than the workload can currently spare.
+
 ## Problem
 
 If you run a workload that processes files of varying size — from small text documents to multi-hour video jobs — HPA scale-down will kill pods seemingly at random. A pod burning 2 CPU cores transcoding a video can be terminated just as easily as a pod sitting idle waiting for its next task. The annotation-based approach solves this without any changes to the workload code.
@@ -15,9 +17,9 @@ every syncInterval (default 60s):
   for each configured target (namespace + labelSelector):
     for each matching pod in Running phase:
       get CPU from metrics-server
-      if CPU > busyCPUThreshold  → annotate with busyCost   (high, protected)
-      if CPU ≤ busyCPUThreshold  → annotate with idleCost   (low, preferred for deletion)
-      if metrics not available   → annotate with noMetricsCost (high, pod is starting up)
+      if CPU > busyCPUThreshold  → annotate with busyCost, label pdcc/task-state=busy   (high, protected)
+      if CPU ≤ busyCPUThreshold  → annotate with idleCost, label pdcc/task-state=idle   (low, preferred for deletion)
+      if metrics not available   → annotate with noMetricsCost, label pdcc/task-state=busy (high, pod is starting up)
 ```
 
 Pods in non-Running phases (Pending, Succeeded, Failed) and pods already being terminated are left untouched.
@@ -75,10 +77,10 @@ helm uninstall pdcc --namespace pdcc-system
 # Controller pod should be Running
 kubectl get pods -n pdcc-system
 
-# After one sync interval, check that target pods have the annotation
+# After one sync interval, check that target pods have the annotation and label
 kubectl get pods -n <your-namespace> \
   -l <your-label-selector> \
-  -o custom-columns='NAME:.metadata.name,PHASE:.status.phase,COST:.metadata.annotations.controller\.kubernetes\.io/pod-deletion-cost'
+  -o custom-columns='NAME:.metadata.name,PHASE:.status.phase,COST:.metadata.annotations.controller\.kubernetes\.io/pod-deletion-cost,STATE:.metadata.labels.pdcc/task-state'
 ```
 
 ## Configuration
